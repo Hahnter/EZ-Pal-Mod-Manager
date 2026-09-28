@@ -6,8 +6,7 @@ Palworld build of UE4SS moves faster than this app does. So the app asks
 GitHub what the current release is and downloads it -- only ever after the
 user presses a button, and only from the two repositories named here.
 
-This and palnexus (Nexus Mods, only once the user has connected an account)
-are the only modules that touch the network.
+This is the only module that touches the network.
 """
 import hashlib
 import json

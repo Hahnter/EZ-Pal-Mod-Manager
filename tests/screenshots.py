@@ -4,9 +4,9 @@
     python tests/screenshots.py            writes docs/screenshots/*.png
 
 Not a test (run_all.py only runs test_*.py). It uses the same sandbox as the
-tests -- a throwaway Palworld install in the temp folder, network blocked,
-Nexus faked -- so the pictures never show anyone's real mods, saves or
-account, and taking them never touches a real install.
+tests -- a throwaway Palworld install in the temp folder, network blocked --
+so the pictures never show anyone's real mods or saves, and taking them
+never touches a real install.
 
 Windows draws the windows it captures, so it has to be run on a desktop where
 the app's windows can appear (or under Xvfb on Linux).
@@ -21,7 +21,7 @@ from helpers import (fake_pak, lua_mod, make_game, sandbox, use_game,   # noqa: 
                      write_log)
 
 SB = sandbox("screenshots")
-import palinfo, palmedia, palnexus, palregistry, palsafety   # noqa: E402
+import palinfo, palmedia, palregistry, palsafety   # noqa: E402
 
 OUT = Path(__file__).resolve().parent.parent / "docs" / "screenshots"
 OUT.mkdir(parents=True, exist_ok=True)
@@ -117,43 +117,24 @@ palmedia.set_description(
     "Works with the current game build. Needs UE4SS.")
 
 # --------------------------------------------------------------------------
-# a Nexus connection, faked: one mod has an update
-# --------------------------------------------------------------------------
-palnexus.set_key("A" * 40)
-now = time.time()
-cache = {"account": {"name": "PalTamer", "premium": False, "supporter": False,
-                     "user_id": 1},
-         "checked": now - 120, "mods": {}, "files": {}}
-for name, m in LUA.items():
-    if m.get("local"):
-        continue
-    latest = {"FastTravelAnywhere": "3.2.0", "BetterStorage": "1.5.0"}.get(
-        name, m["version"])
-    cache["mods"][str(m["id"])] = {"when": now, "info": {
-        "id": m["id"], "name": name, "version": latest, "available": True,
-        "updated": now}}
-    cache["files"][str(m["id"])] = {"when": now, "files": {"files": [{
-        "id": m["id"] * 10, "name": name, "version": latest, "category": "MAIN",
-        "primary": True, "size": 48213, "size_exact": True,
-        "file_name": f"{name}-{m['id']}-{latest.replace('.', '-')}-1759000000.zip",
-        "uploaded": now - 86400, "description": ""}], "updates": []}}
-palnexus._save_cache(cache)
-palnexus.validate = lambda key=None: cache["account"]
-palnexus.check_updates = lambda reg, progress=None, force=False: palnexus.updates(reg)
-palnexus.handler_status = lambda: {"command": None, "owner": "Vortex", "ours": False,
-                                   "stale": False, "supported": True}
-
-# --------------------------------------------------------------------------
 # the app
 # --------------------------------------------------------------------------
 import tkinter as tk                                           # noqa: E402
 from PIL import ImageGrab                                      # noqa: E402
 
 palsafety.game_running = lambda g: False
+import palmods                                                 # noqa: E402
+# A developer's reference/dwmapi.dll beside the source would flag the
+# sandbox's fake UE4SS as the wrong build.
+palmods.doctor = lambda fix=False: ([], [])
 import palmods_gui as G                                        # noqa: E402
-import palnexuswin as NW                                       # noqa: E402
 
+# Tk reports positions in real pixels only once the process is DPI aware,
+# which is what ImageGrab captures in. Pin the scale to 100% so the
+# pictures come out the same size on any display.
+G._dpi_aware()
 root = tk.Tk()
+root.tk.call("tk", "scaling", 96 / 72)
 # X11 draws a focus ring around text fields that Windows doesn't.
 root.option_add("*Entry.highlightThickness", 0)
 root.option_add("*Text.highlightThickness", 0)
@@ -168,6 +149,10 @@ def pump(seconds):
 
 
 def shot(widget, name):
+    # ImageGrab copies the screen, so anything covering the window would be
+    # captured instead of it.
+    widget.attributes("-topmost", True)
+    widget.lift()
     widget.update_idletasks()
     # Park the pointer in the footer, so no row is drawn hovered.
     widget.event_generate("<Motion>", warp=True, x=widget.winfo_width() - 4,
@@ -188,16 +173,6 @@ info = palinfo.ModInfoWindow(app, app.rows["BetterStorage"]["entry"])
 info.geometry("840x860+0+0")
 shot(info, "mod-info")
 info.destroy()
-
-nw = NW.NexusWindow(app)
-nw.geometry("720x700+0+0")
-shot(nw, "nexus")
-nw.destroy()
-
-up = NW.UpdatesWindow(app)
-up.geometry("720x420+0+0")
-shot(up, "updates")
-up.destroy()
 
 src = SB / "src"
 lua_mod(src, "PalHarvest")

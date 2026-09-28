@@ -56,6 +56,11 @@ def sandbox(tag):
         return g
     palpaths.game = guarded_game
 
+    # A developer's old hand-made registry.json beside the source would be
+    # adopted on first load and leak real mods into every test.
+    import palregistry
+    palregistry._legacy_registry = lambda: {}
+
     if os.environ.get("PMM_TEST_REAL_RECYCLE") != "1":
         import paltools
 
