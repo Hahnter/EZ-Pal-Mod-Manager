@@ -8,6 +8,8 @@ the wrong one, and a mod that fails to load fails silently. This reads the
 contents of every `.pak`, cross-references what UE4SS actually loaded last run,
 and says which of those two things went wrong.
 
+![The main window: script and pak mods with their state, a Nexus update banner, and a mod that didn't start](docs/screenshots/main.png)
+
 Windows, no install, no dependencies. Download the zip from
 [Releases](https://github.com/Hahnter/EZ-Pal-Mod-Manager/releases), extract it
 into your Palworld folder (the one with `Palworld.exe`) or anywhere else, and run
@@ -49,6 +51,8 @@ PalHarvest-5233-2-1-0.zip        3 items, 4 files · Nexus mod 5233, v2.1.0
   ☑  PalHarvestIcons_P  content pak     → Pal\Content\Paks\~mods
 ```
 
+<img src="docs/screenshots/install.png" alt="The install window, showing where each part of a download goes" width="620">
+
 One archive often holds several mods; each one can be left out. Existing files
 are backed up as `.pmm-bak` rather than overwritten. You can pick several
 downloads at once, or drop them onto the `.exe`; they open one after another.
@@ -69,6 +73,8 @@ type details for are the ones you got some other way.
 **Shows what each mod is.** Click a mod's name to open its info: a picture
 gallery, a description, and where it came from. Mods with a picture get a
 thumbnail in the list, and search looks inside descriptions too.
+
+<img src="docs/screenshots/mod-info.png" alt="A mod's info window: picture, description and where it came from" width="620">
 
 The app never reads Nexus or CurseForge web pages. Both sites' terms forbid
 tools that do (Nexus terms §11, Overwolf/CurseForge §3). Connect your Nexus
@@ -113,6 +119,11 @@ is sent to Nexus until you do. Once connected:
   the same on demand, and never replaces what you wrote without asking.
 - **Renamed downloads.** A zip whose name no longer carries its Nexus ID is
   looked up by checksum, so it still links to its page.
+
+<p>
+<img src="docs/screenshots/nexus.png" alt="The Nexus Mods window: account, options and update checks" width="49%">
+<img src="docs/screenshots/updates.png" alt="Mods with a newer version on Nexus" width="49%">
+</p>
 
 For your own mods, what you write and add here goes into *Package for
 sharing*: the description as `DESCRIPTION.md` and the pictures under
@@ -399,6 +410,10 @@ and any attempt to resolve a game folder outside the temp folder fails the
 test. Network access is blocked, test windows stay hidden, and removed files
 are deleted rather than sent to your Recycle Bin (set
 `PMM_TEST_REAL_RECYCLE=1` to exercise the real Recycle Bin).
+
+`python tests/screenshots.py` retakes the pictures in `docs/screenshots` the
+same way: a made-up install with made-up mods and a faked Nexus account, so
+they never show anyone's real setup.
 
 ## Notes
 
