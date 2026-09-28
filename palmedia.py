@@ -3,7 +3,9 @@
 
 Nothing here talks to Nexus or CurseForge. Both sites' terms forbid tools that
 read or copy their pages (Nexus terms s.11; Overwolf/CurseForge s.3), so the
-app never fetches them. The information gets in the way a person would move it:
+app never fetches them. (Once connected with an API key, palnexus can fill a
+Nexus mod in from Nexus's official API instead -- that is the route their terms
+provide.) Otherwise the information gets in the way a person would move it:
 
   clipboard   copy the description or right-click > Copy image on the mod page
               in your browser, then Paste in the app
@@ -140,17 +142,25 @@ def _need_pil():
 
 def add_image_file(name, path):
     """Add an image from disk. Returns the stored Path."""
-    _need_pil()
     p = Path(path)
     try:
         raw = p.read_bytes()
+    except OSError as exc:
+        raise MediaError(f"{p.name} couldn't be read.") from exc
+    return add_image_bytes(name, raw, p.name)
+
+
+def add_image_bytes(name, raw, label="The picture"):
+    """Add an image from its encoded bytes (a file, or a download)."""
+    _need_pil()
+    try:
         img = Image.open(io.BytesIO(raw))
         img.load()
     except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
-        raise MediaError(f"{p.name} claims to be far bigger than any real "
+        raise MediaError(f"{label} claims to be far bigger than any real "
                          f"picture, so it wasn't opened.") from exc
-    except OSError as exc:
-        raise MediaError(f"{p.name} isn't an image this app can read.") from exc
+    except (OSError, ValueError) as exc:
+        raise MediaError(f"{label} isn't an image this app can read.") from exc
     return _store(name, img, hashlib.sha1(raw).hexdigest()[:12])
 
 

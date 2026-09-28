@@ -77,6 +77,12 @@ DEFAULTS = {
     "last_install_dir": None,
     "installs": [],             # every install the user has pointed us at
     "auto_backup": True,        # back up saves before a new mod setup launches
+    # Nexus Mods. Nothing is asked of Nexus until an API key is added; these
+    # say what happens once one is.
+    "nexus_check_updates": True,   # look for mod updates when the app opens
+    "nexus_autofill": True,        # fill in description and picture on install
+    "nxm_handler": False,          # opted in to handling Mod Manager Download
+    "nxm_previous": None,          # the nxm:// command that was there before
 }
 
 

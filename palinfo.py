@@ -6,6 +6,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 
 import palmedia
+import palnexus
 import palregistry
 from paltext import plural
 from palui import (open_link, BG, SURFACE, RAISED, LINE, TEXT, DIM, FAINT, ACCENT, GOOD,
@@ -436,6 +437,45 @@ class ModInfoWindow(Window):
             tk.Entry(box, textvariable=self.vars[key], bg=RAISED, fg=TEXT,
                      relief="flat", insertbackground=TEXT, font=app.f_small
                      ).grid(row=r, column=1, sticky="ew", ipady=4, ipadx=6)
+        if meta.get("author"):
+            label(7, "Author")
+            tk.Label(box, text=meta["author"], bg=SURFACE, fg=TEXT,
+                     font=app.f_small, anchor="w").grid(row=7, column=1, sticky="w")
+
+        # With a Nexus connection, the details come from Nexus's API rather
+        # than being copied across by hand.
+        if palnexus.connected() and meta.get("source") == "Nexus" and meta.get("id"):
+            row = tk.Frame(self.body, bg=SURFACE)
+            row.pack(fill="x", padx=22, pady=(10, 0))
+            self.nexus_btn = button(row, "Fill in from Nexus", self._from_nexus,
+                                    "quiet", app.f_small, (12, 5),
+                                    icon_name="download")
+            self.nexus_btn.pack(side="left")
+            tk.Label(row, text="Description and main picture, from the mod's "
+                               "Nexus listing.", bg=SURFACE, fg=FAINT,
+                     font=app.f_small).pack(side="left", padx=8)
+
+    def _from_nexus(self):
+        if self.text.get("1.0", "end").strip() and not messagebox.askyesno(
+                TITLE, "Replace the description with the one on Nexus?",
+                parent=self):
+            return
+        self.nexus_btn.config(state="disabled")
+        self.status.config(text="Asking Nexus…", fg=DIM)
+        self.app.nexus_fill([self.mod], overwrite=True, report=True)
+
+    def nexus_filled(self, details):
+        """The app fetched this mod's Nexus details and stored them."""
+        if not self.winfo_exists():
+            return
+        if details.get("description"):
+            self._set_text(details["description"])
+        self.shown = None
+        self._render_pictures()
+        self._baseline = self._snapshot()
+        if hasattr(self, "nexus_btn"):
+            self.nexus_btn.config(state="normal")
+        self.status.config(text="Filled in from Nexus.", fg=GOOD)
 
     def _link_changed(self):
         parsed = palmedia.parse_link(self.vars["url"].get())

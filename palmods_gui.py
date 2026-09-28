@@ -9,6 +9,7 @@ Tkinter only, so it runs on a stock Python and freezes to a single .exe.
 
     python palmods_gui.py                 open the app
     python palmods_gui.py <mod.zip>       open it ready to install that file
+    python palmods_gui.py nxm://...       download from Nexus (Mod Manager Download)
 """
 
 import json
@@ -23,11 +24,14 @@ import tkinter.font as tkfont
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog
 
+import palhandoff
 import palicons
 import palinfo
 import palinstall
 import palmedia
 import palmods
+import palnexus
+import palnexuswin
 import palpaths
 import palregistry
 import palsafety
@@ -235,6 +239,9 @@ class InstallWindow(tk.Toplevel):
         wrap.pack(fill="both", expand=True, padx=20, pady=14)
 
         self.protocol("WM_DELETE_WINDOW", self._close)
+        # A file this app just downloaded from Nexus: which file it was.
+        self.nexus = app._nexus_downloads.get(str(source))
+        self._lookup = queue.Queue()
         self.after(50, lambda: self._load(source))
 
     def _load(self, source):
@@ -257,6 +264,7 @@ class InstallWindow(tk.Toplevel):
             bits.append(f"version {guess['version']}")
         self.sub.config(text="   ·   ".join(bits), fg=DIM)
         self._prefill_link(comps, guess)
+        self._identify(guess)
 
         if not comps:
             self.go.config(state="disabled")
@@ -343,7 +351,10 @@ class InstallWindow(tk.Toplevel):
         known = next((palregistry.url_for(c["name"]) for c in comps
                       if palregistry.url_for(c["name"])
                       and str(palregistry.url_for(c["name"])).startswith("http")), None)
-        if known:
+        if self.nexus:
+            self._link_origin = "downloaded from Nexus"
+            self.link_var.set(palnexus.MOD_PAGE.format(id=self.nexus["mod_id"]))
+        elif known:
             self._link_origin = "kept from the last install"
             self.link_var.set(known)
         elif guess.get("source") == "Nexus" and guess.get("url"):
@@ -351,6 +362,44 @@ class InstallWindow(tk.Toplevel):
             self.link_var.set(guess["url"])
         else:
             self._link_changed()
+
+    def _identify(self, guess):
+        """A download renamed since it left Nexus: look it up by checksum.
+
+        Only with a Nexus connection, only for a single file, and only when
+        nothing else already says where it came from.
+        """
+        src = Path(self.plan["source"])
+        if (self.nexus or guess.get("source") == "Nexus" or self.link_var.get()
+                or not src.is_file() or not palnexus.connected()):
+            return
+        self.link_note.config(text="Looking this file up on Nexus…", fg=FAINT)
+
+        def work():
+            try:
+                self._lookup.put(palnexus.identify(src))
+            except (palnexus.NexusError, OSError):
+                self._lookup.put(None)
+        threading.Thread(target=work, daemon=True).start()
+        self.after(150, self._identified)
+
+    def _identified(self):
+        if not self.winfo_exists():
+            return
+        try:
+            fields = self._lookup.get_nowait()
+        except queue.Empty:
+            self.after(150, self._identified)
+            return
+        if not fields:
+            self._link_changed()
+            return
+        if not self.link_var.get().strip():
+            self.nexus = {"mod_id": fields["id"],
+                          "file_id": fields.get("nexus_file_id"),
+                          "version": fields.get("version")}
+            self._link_origin = "matched on Nexus by its checksum"
+            self.link_var.set(fields["url"])
 
     def _clipboard_link(self):
         try:
@@ -418,10 +467,16 @@ class InstallWindow(tk.Toplevel):
         if not chosen:
             messagebox.showinfo("EZ Pal Mod Manager", "Nothing selected.", parent=self)
             return
+        extra = None
+        if self.nexus and palmedia.parse_link(self.link_var.get()).get("id") \
+                == self.nexus["mod_id"]:
+            extra = {"nexus_file_id": self.nexus.get("file_id"),
+                     "version": self.nexus.get("version") or None,
+                     "nexus_uploaded": self.nexus.get("uploaded") or None}
         try:
             lines = palinstall.apply(self.plan, chosen,
                                      enable=self.enable_var.get(),
-                                     link=self.link_var.get())
+                                     link=self.link_var.get(), extra=extra)
         except OSError as exc:
             messagebox.showerror("EZ Pal Mod Manager",
                                  f"Install failed:\n\n{exc}", parent=self)
@@ -430,6 +485,7 @@ class InstallWindow(tk.Toplevel):
         self._close(advance=False)
         self.app.reload(full=True)
         self.app.flash(f"Installed {plural(len(chosen), 'mod')}. They load the next time you play.")
+        self.app.nexus_fill([c["name"] for c in chosen])
         # With more downloads queued, don't stop for a dialog after each one.
         if not queued:
             messagebox.showinfo("EZ Pal Mod Manager",
@@ -616,6 +672,9 @@ class App:
         self.rows = {}
         self._thumbs = {}            # (path, mtime) -> PhotoImage, kept across renders
         self._install_queue = []     # downloads waiting for their install window
+        self._nexus_downloads = {}   # path -> which Nexus file it is
+        self._nexus_updates = {}     # name -> update, from the last check
+        self._nexus_busy = False
         self.headers = {}
         self._order = []
         self._sig = None
@@ -640,12 +699,18 @@ class App:
 
         self._chrome()
 
+        palhandoff.heartbeat()
+        pending = list(pending_install or []) + palhandoff.receive()
         if palpaths.game() is None:
             self.root.after(120, lambda: SetupWindow(self, first_run=True))
         else:
             self.reload(full=True)
-            if pending_install:
-                self.root.after(200, lambda: self.queue_installs(pending_install))
+            if pending:
+                self.root.after(200, lambda: self.handle_incoming(pending))
+            if palnexus.connected() and \
+                    palpaths.load_settings().get("nexus_check_updates", True):
+                self.root.after(1500, self.check_nexus_updates)
+        palnexus.refresh_handler()
 
         root.bind("<FocusIn>", lambda e: self._poll(once=True))
         root.bind("<Control-f>", lambda e: self.search_entry.focus_set())
@@ -999,8 +1064,13 @@ class App:
                 source=palregistry.describe_source(sm["name"], meta),
                 url=palregistry.url_for(sm["name"], meta),
                 mine=meta.get("source") == "local"))
+        self._nexus_updates = palnexus.updates(reg) if palnexus.connected() else {}
         for e in out:
             meta = reg.get(e["name"], {})
+            e["update"] = self._nexus_updates.get(e["name"])
+            if e["update"] and e["update"]["removed"]:
+                e["note"] = "; ".join(n for n in (e["note"], "no longer "
+                                      "available on Nexus") if n)
             e["cover"] = palmedia.cover_path(e["name"], meta)
             e["search"] = " ".join((e["name"], e["source"],
                                     (meta.get("description") or "")[:4000])).lower()
@@ -1134,6 +1204,13 @@ class App:
             self._banner(f"Stopped loading after the game updated: {names}. "
                          f"Check its page for an update.", "bad",
                          [("UE4SS log", self.open_log)])
+
+        ups = sorted(n for n, u in self._nexus_updates.items() if not u["removed"])
+        if ups:
+            self._banner(f"{plural(len(ups), 'mod')} {'has' if len(ups) == 1 else 'have'} "
+                         f"a newer version on Nexus: {', '.join(ups[:3])}"
+                         + (" and more." if len(ups) > 3 else "."), "info",
+                         [("Review", self.open_updates)])
 
         pairs = [c for c in data["conflicts"]["pairs"] if c["live"]]
         clashes = [c for c in data["keybinds"]["clashes"] if c["live"]]
@@ -1336,6 +1413,12 @@ class App:
         if version:
             meta_bits.append(tk.Label(meta_line, text=f"v{version}", bg=base, fg=FAINT,
                                       font=self.f_small))
+        if e.get("update") and not e["update"]["removed"]:
+            up = tk.Label(meta_line, text=f"update to v{e['update']['version']} ",
+                          bg=base, fg=ACCENT, font=self.f_small, cursor="hand2",
+                          image=icon("download", ACCENT, 12), compound="right")
+            up.bind("<Button-1>", lambda _e, n=e["name"]: self.update_mod(n))
+            meta_bits.append(up)
         for i, w in enumerate(meta_bits):
             if i:
                 tk.Label(meta_line, text="·", bg=base, fg=FAINT,
@@ -1421,6 +1504,14 @@ class App:
         if e["url"]:
             m.add_command(label="Open mod page",
                           command=lambda: open_link(e["url"]))
+        if e.get("update") and not e["update"]["removed"]:
+            m.add_command(label=f"Update to v{e['update']['version']}…",
+                          command=lambda: self.update_mod(e["name"]))
+        meta = self._data["registry"].get(e["name"], {})
+        if palnexus.connected() and meta.get("source") == "Nexus" and meta.get("id"):
+            m.add_command(label="Fill in details from Nexus",
+                          command=lambda: self.nexus_fill([e["name"]], overwrite=True,
+                                                          report=True))
         if e["configs"]:
             m.add_command(label="Configure…",
                           command=lambda: ConfigWindow(self, e["name"], e["configs"]))
@@ -1465,6 +1556,16 @@ class App:
                               command=lambda: palwindows.compare_modlist(self))
             m.add_cascade(label="Share modlist", menu=share)
             m.add_separator()
+            nexus = dark_menu(m, self.f_small)
+            nexus.add_command(label=("Connected…" if palnexus.connected()
+                                     else "Connect…"),
+                              command=lambda: palnexuswin.NexusWindow(self))
+            if palnexus.connected():
+                nexus.add_command(label="Check for updates",
+                                  command=lambda: self.check_nexus_updates(
+                                      force=True, report=True))
+                nexus.add_command(label="Updates…", command=self.open_updates)
+            m.add_cascade(label="Nexus Mods", menu=nexus)
 
             tools = dark_menu(m, self.f_small)
             tools.add_command(label="Conflicts & hotkeys…", command=self.open_conflicts)
@@ -1587,6 +1688,11 @@ class App:
         self.status.config(text=msg, fg=fg)
 
     def _poll(self, once=False):
+        if not once:
+            palhandoff.heartbeat()
+            got = palhandoff.receive()
+            if got:
+                self.handle_incoming(got)
         # Never clobber toggles the user has not applied yet.
         try:
             if self._paths and not self._pending():
@@ -1698,7 +1804,9 @@ class App:
         try:
             while True:
                 kind, when = self._events.get_nowait()
-                if kind == "started":
+                if kind.startswith("nexus"):
+                    self._nexus_event(kind, when)
+                elif kind == "started":
                     self._running = True
                     self._session_start = when
                     self.play_btn.config(text=" Running", state="disabled",
@@ -1737,6 +1845,144 @@ class App:
         for name in self.rows:
             self._set_row(name, self.rows[name]["was"])
         self._recount()
+
+    # ---------------------------------------------------------------- nexus
+    def handle_incoming(self, items):
+        """Files and nxm:// links, from the command line or a second copy."""
+        files = [i for i in items if not i.lower().startswith("nxm://")]
+        links = [i for i in items if i.lower().startswith("nxm://")]
+        try:
+            self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+        except tk.TclError:
+            pass
+        if files:
+            self.queue_installs([f for f in files if Path(f).exists()])
+        for link in links:
+            self.open_nxm(link)
+
+    def open_nxm(self, url):
+        try:
+            link = palnexus.parse_nxm(url)
+        except palnexus.NexusError as exc:
+            messagebox.showerror("EZ Pal Mod Manager", str(exc))
+            return
+        palnexuswin.DownloadWindow(self, link["mod_id"], link["file_id"], link=link)
+
+    def install_downloaded(self, path, mod_id, f):
+        """A file just downloaded from Nexus: on to the usual install window."""
+        self._nexus_downloads[str(path)] = {
+            "mod_id": int(mod_id), "file_id": f["id"],
+            "version": f.get("version"), "uploaded": f.get("uploaded")}
+        self.queue_installs([path])
+
+    def nexus_changed(self):
+        """Connected or disconnected: rows and banners depend on it."""
+        if self._data:
+            self._entries_cache = self._build_entries()
+            self.render()
+
+    def open_updates(self):
+        palnexuswin.UpdatesWindow(self)
+
+    def update_mod(self, name):
+        u = self._nexus_updates.get(name)
+        if not u or u["removed"]:
+            return
+        if (palnexus.account() or {}).get("premium") and u.get("file"):
+            palnexuswin.DownloadWindow(self, u["mod_id"], u["file"]["id"])
+            return
+        open_link(u["url"])
+        self.flash("Press Mod Manager Download on the Files tab"
+                   + (" and it opens here." if palnexus.handler_status()["ours"]
+                      else ", then install the download here."))
+
+    def check_nexus_updates(self, force=False, report=False):
+        """Ask Nexus about every linked mod, off the Tk thread."""
+        if self._nexus_busy or not palnexus.connected() or not self._data:
+            return
+        self._nexus_busy = True
+        reg = dict(self._data["registry"])
+
+        def work():
+            try:
+                # Also notices a key revoked on the site, or an account that
+                # has gone Premium since it was connected.
+                palnexus.validate()
+                self._events.put(("nexus-updates",
+                                  (palnexus.check_updates(reg, force=force), report)))
+            except palnexus.NexusError as exc:
+                self._events.put(("nexus-error", (str(exc), report)))
+        threading.Thread(target=work, daemon=True).start()
+
+    def nexus_fill(self, names, overwrite=False, report=False):
+        """Fetch Nexus's description and picture for mods that lack them."""
+        if not palnexus.connected() or not names:
+            return
+        if not overwrite and not palpaths.load_settings().get("nexus_autofill", True):
+            return
+        reg = palregistry.load_registry()
+        wanted = {}
+        for n in names:
+            e = reg.get(n, {})
+            if e.get("source") != "Nexus" or not str(e.get("id") or "").isdigit():
+                continue
+            have = palmedia.info(n, e)
+            if overwrite or not have["description"] or not have["images"]:
+                wanted.setdefault(int(e["id"]), []).append(n)
+        if not wanted:
+            return
+
+        def work():
+            for mod_id, mods in wanted.items():
+                try:
+                    details = palnexus.fetch_details(mod_id)
+                except palnexus.NexusError as exc:
+                    self._events.put(("nexus-error", (str(exc), report)))
+                    continue
+                self._events.put(("nexus-details", (mods, details, overwrite, report)))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _nexus_event(self, kind, payload):
+        if kind == "nexus-updates":
+            self._nexus_busy = False
+            found, report = payload
+            if self._data:
+                self._data["registry"] = palregistry.load_registry()
+                self._entries_cache = self._build_entries()
+                self.render()
+            live = [n for n, u in self._nexus_updates.items() if not u["removed"]]
+            for w in self.root.winfo_children():
+                if isinstance(w, (palnexuswin.UpdatesWindow, palnexuswin.NexusWindow)):
+                    w.render()
+                    w.status.config(text="")
+            if report:
+                self.flash(f"{plural(len(live), 'mod')} can be updated from Nexus"
+                           if live else "Every Nexus mod is up to date")
+        elif kind == "nexus-error":
+            self._nexus_busy = False
+            message, report = payload
+            for w in self.root.winfo_children():
+                if isinstance(w, palinfo.ModInfoWindow) and hasattr(w, "nexus_btn"):
+                    w.nexus_btn.config(state="normal")
+                    w.status.config(text="")
+            if report:
+                messagebox.showwarning("EZ Pal Mod Manager", message)
+            else:
+                self.status.config(text=f"Nexus: {message}", fg=DIM)
+        elif kind == "nexus-details":
+            mods, details, overwrite, report = payload
+            got = []
+            for n in mods:
+                got = palnexus.apply_details(n, details, overwrite=overwrite) or got
+            for w in self.root.winfo_children():
+                if isinstance(w, palinfo.ModInfoWindow) and w.mod in mods:
+                    w.nexus_filled(details)
+            self.media_changed(mods[0])
+            if got or report:
+                self.flash(f"Filled in the {' and '.join(got)} from Nexus" if got
+                           else "Nothing new on Nexus to fill in")
 
     def install_dialog(self):
         last = palpaths.load_settings().get("last_install_dir")
@@ -1934,9 +2180,14 @@ def _dark_titlebar(window):
 def main():
     _dpi_aware()
 
-    # Launched with files (several zips dragged onto the exe, or Open With):
-    # go straight to the installer for each.
-    pending = [a for a in sys.argv[1:] if Path(a).exists()] or None
+    # Launched with files (several zips dragged onto the exe, or Open With)
+    # or a Nexus Mod Manager Download link: go straight to the installer for
+    # each. If the app is already open, it gets them instead of a second copy.
+    pending = [a for a in sys.argv[1:]
+               if a.lower().startswith("nxm://") or Path(a).exists()] or None
+    if pending and palhandoff.other_running():
+        palhandoff.send(pending)
+        return 0
 
     root = tk.Tk()
     try:
@@ -1954,7 +2205,10 @@ def main():
             pass
     _dark_titlebar(root)
     App(root, pending_install=pending)
-    root.mainloop()
+    try:
+        root.mainloop()
+    finally:
+        palhandoff.stop()
 
 
 if __name__ == "__main__":
