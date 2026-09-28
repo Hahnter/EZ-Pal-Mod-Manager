@@ -19,7 +19,6 @@ a = Analysis(
     hiddenimports=['palmods', 'palpaths', 'palregistry', 'palinstall',
                    'palsafety', 'paltools', 'palui', 'palwindows',
                    'palmedia', 'palinfo', 'palicons', 'paltext', 'palget',
-                   'palnexus', 'palnexuswin', 'palhandoff',
                    'PIL.ImageTk'],
     hookspath=[],
     hooksconfig={},

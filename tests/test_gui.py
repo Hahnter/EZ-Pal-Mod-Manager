@@ -75,9 +75,9 @@ app.more_menu()
 menu = opened[-1]
 top = [menu.entrycget(i, "label") for i in range(menu.index("end") + 1)
        if menu.type(i) in ("command", "cascade")]
-check("⋯ menu: eight top-level entries",
-      top == ["Refresh   F5", "Profiles", "Save backups…", "Share modlist",
-              "Nexus Mods", "Tools", "Open folder", "Switch install"], top)
+check("⋯ menu: seven top-level entries",
+      top == ["Refresh   F5", "Profiles", "Save backups…", "Share modlist", "Tools",
+              "Open folder", "Switch install"], top)
 tools_menu = next(menu.nametowidget(menu.entrycget(i, "menu"))
                   for i in range(menu.index("end") + 1)
                   if menu.type(i) == "cascade" and menu.entrycget(i, "label") == "Tools")

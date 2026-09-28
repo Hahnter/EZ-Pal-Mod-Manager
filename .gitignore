@@ -27,3 +27,6 @@ desktop.ini
 
 # PyInstaller log: full of local paths (Windows username, folder layout)
 build/pyi-log.txt
+
+# Private notes on the Nexus registration process
+NEXUS-LOG.md

@@ -440,14 +440,13 @@ def _keep_users_copy(dst, src, shipped):
     return now != _digest(src)
 
 
-def apply(plan, components=None, enable=True, backup=True, link=None, extra=None):
+def apply(plan, components=None, enable=True, backup=True, link=None):
     """Install the chosen components. Returns a list of human-readable results.
 
     Anything overwritten is kept as <file>.pmm-bak, and every file written is
     recorded so uninstall does not have to guess. `link` is the page the mod
     was downloaded from; it applies to every component, since the parts of a
-    hybrid mod share one page. `extra` is more registry fields for each (the
-    Nexus file id of a download, say).
+    hybrid mod share one page.
     """
     chosen = components if components is not None else plan["components"]
     page = link_fields(link)
@@ -508,9 +507,6 @@ def apply(plan, components=None, enable=True, backup=True, link=None, extra=None
             extra={"kind": c["kind"], "installed_from": str(plan["source"])})
         if page:
             palregistry.set_entry(c["name"], **page)
-        if extra:
-            palregistry.set_entry(c["name"], **{k: v for k, v in extra.items()
-                                                if v not in (None, "")})
         # A README shipped inside a UE4SS mod's own folder describes it.
         if c["kind"] == UE4SS_MOD and not palmedia.info(c["name"])["description"]:
             readme = palmedia.readme_in(c["dest"])
