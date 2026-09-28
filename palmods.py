@@ -9,6 +9,7 @@ loaded, and reports what is working, what failed, and what is in the wrong folde
     python palmods.py status --html       also write dashboard.html
     python palmods.py enable  <name>      stage a mod on  (applies next launch)
     python palmods.py disable <name>      stage a mod off (applies next launch)
+    python palmods.py nexus updates       check Nexus for newer versions
 
 Writes manifest.json on every run; the in-game panel (stage 2) reads that file,
 because UE4SS Lua has io.open but no directory listing.
@@ -1208,7 +1209,7 @@ def cmd_path(args):
     return 0 if g else 1
 
 
-def cmd_install(args):
+def cmd_install(args, extra=None):
     import palinstall
     plan = palinstall.inspect(args.archive)
     try:
@@ -1229,7 +1230,7 @@ def cmd_install(args):
             if input("\nInstall? [y/N] ").strip().lower() not in ("y", "yes"):
                 print("Cancelled.")
                 return 1
-        for line in palinstall.apply(plan, link=args.link):
+        for line in palinstall.apply(plan, link=args.link, extra=extra):
             print(f"  {line}")
         print("\nRestart Palworld for this to take effect.")
         return 0
@@ -1286,6 +1287,110 @@ def cmd_source(args):
         id=int(args.id) if args.id else None, version=args.version)
     print(f"{args.name}: {palregistry.describe_source(args.name, entry)}")
     return 0
+
+
+def cmd_nexus(args):
+    """Nexus Mods: connect, check for updates, fill in details, download."""
+    import palnexus
+    act = args.action
+    try:
+        if act == "connect":
+            key = args.value or input("Paste your Nexus personal API key: ").strip()
+            acct = palnexus.validate(key)
+            palnexus.set_key(key)
+            print(f"Connected as {acct['name']}"
+                  f"{' (Premium)' if acct['premium'] else ''}.")
+            return 0
+        if act == "disconnect":
+            palnexus.clear_key()
+            print("Disconnected. The key was deleted from this PC.")
+            return 0
+        if act == "status":
+            if not palnexus.connected():
+                print("Not connected. Run: palmods.py nexus connect")
+                return 1
+            acct = palnexus.account() or palnexus.validate()
+            print(f"Connected as {acct['name']}"
+                  f"{' (Premium)' if acct['premium'] else ''}.")
+            st = palnexus.handler_status()
+            if st["supported"]:
+                print(f"Mod Manager Download opens in: {st['owner'] or 'nothing'}")
+            return 0
+        if act == "updates":
+            reg = palregistry.load_registry()
+            found = palnexus.check_updates(reg, force=args.force)
+            linked = palnexus.nexus_mods(reg)
+            print(f"Checked {len(linked)} Nexus mod(s).")
+            for name, u in sorted(found.items()):
+                if u["removed"]:
+                    print(f"  {name:<28} no longer available on Nexus")
+                else:
+                    have = reg[name].get("version") or "?"
+                    print(f"  {name:<28} v{have} -> v{u['version']}   {u['url']}")
+            if not found:
+                print("  everything is up to date")
+            return 0
+        if act == "fill":
+            if not args.value:
+                print("nexus fill needs a mod name.")
+                return 1
+            entry = palregistry.get(args.value)
+            if entry.get("source") != "Nexus" or not entry.get("id"):
+                print(f"'{args.value}' isn't linked to a Nexus mod. Link it with: "
+                      f"palmods.py source {args.value} --set-source Nexus --id <id>")
+                return 1
+            got = palnexus.apply_details(args.value,
+                                         palnexus.fetch_details(entry["id"]),
+                                         overwrite=args.force)
+            print(f"Filled in: {', '.join(got)}." if got else
+                  "Nothing to fill in (use --force to replace what's there).")
+            return 0
+        if act == "get":
+            if not args.value:
+                print("nexus get needs an nxm:// link, or a mod id.")
+                return 1
+            if args.value.lower().startswith("nxm://"):
+                link = palnexus.parse_nxm(args.value)
+                mod_id, file_id = link["mod_id"], link["file_id"]
+            else:
+                link, mod_id = None, int(args.value)
+                newest = palnexus.newest_file(palnexus.mod_files(mod_id)["files"])
+                if not newest:
+                    print("That mod has no files to download.")
+                    return 1
+                file_id = newest["id"]
+            path, f = palnexus.download(
+                mod_id, file_id, palnexus.downloads_dir(), link=link,
+                progress=lambda d, t: print(f"\r  {d // 1024} of {t // 1024} KB",
+                                            end="", flush=True))
+            print(f"\nDownloaded {path.name}")
+            args.archive, args.link = str(path), palnexus.MOD_PAGE.format(id=mod_id)
+            return cmd_install(args, extra={"nexus_file_id": f["id"],
+                                            "version": f.get("version") or None,
+                                            "nexus_uploaded": f.get("uploaded")})
+        if act == "handler":
+            if args.value not in ("on", "off"):
+                st = palnexus.handler_status()
+                print(f"Mod Manager Download opens in: {st['owner'] or 'nothing'}"
+                      if st["supported"] else "Only available on Windows.")
+                return 0
+            if args.value == "on":
+                was = palnexus.register_handler()
+                print("Mod Manager Download now opens EZ Pal Mod Manager"
+                      + (f" (it was {was}; 'handler off' gives it back)." if was
+                         else "."))
+            else:
+                back = palnexus.unregister_handler()
+                print(f"Handed download links back to {back}." if back
+                      else "Download links no longer open here.")
+            return 0
+    except palnexus.NexusError as exc:
+        print(str(exc))
+        return 1
+    except ValueError:
+        print("That isn't a mod id.")
+        return 1
+    return 1
 
 
 def cmd_profile(args):
@@ -1388,6 +1493,16 @@ def main():
     ex.add_argument("--text", action="store_true", help="readable text, not JSON")
     ex.add_argument("--all", action="store_true", help="include disabled mods")
 
+    nx = sub.add_parser("nexus", help="Nexus Mods: connect, updates, details, downloads")
+    nx.add_argument("action", choices=("status", "connect", "disconnect", "updates",
+                                       "fill", "get", "handler"))
+    nx.add_argument("value", nargs="?",
+                    help="API key (connect), mod name (fill), nxm:// link or mod "
+                         "id (get), on/off (handler)")
+    nx.add_argument("--force", action="store_true",
+                    help="ask Nexus again / replace existing details")
+    nx.add_argument("-y", "--yes", action="store_true", help="do not ask (get)")
+
     pr = sub.add_parser("profile", help="save and restore sets of enabled mods")
     pr.add_argument("action", choices=("list", "save", "load", "delete"))
     pr.add_argument("name", nargs="?")
@@ -1397,7 +1512,8 @@ def main():
     handlers = {"path": cmd_path, "install": cmd_install,
                 "uninstall": cmd_uninstall, "new": cmd_new,
                 "source": cmd_source, "profile": cmd_profile,
-                "check": cmd_check, "backup": cmd_backup, "export": cmd_export}
+                "check": cmd_check, "backup": cmd_backup, "export": cmd_export,
+                "nexus": cmd_nexus}
     if args.cmd in handlers:
         try:
             sys.exit(handlers[args.cmd](args))

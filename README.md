@@ -33,8 +33,9 @@ saying what it means. Where the answer is "you need the Palworld build of UE4SS"
 place, keeping whatever was there as `ue4ss.pmm-old-<date>`. **Install
 PalSchema** does the same for PalSchema. Both windows show the release, file
 name, size and source before anything is downloaded, and nothing is fetched
-until you press the button. This is the only part of the app that uses the
-network; see *Privacy and security* below. Pak mods are still managed without UE4SS; they don't need it.
+until you press the button. Apart from the optional Nexus connection below,
+this is the only part of the app that uses the network; see *Privacy and
+security*. Pak mods are still managed without UE4SS; they don't need it.
 
 **Installs mods.** Point it at a `.zip`, `.7z`, `.rar`, a folder, or a bare
 `.pak`. It reads what's inside, works out where each piece goes, and shows you
@@ -69,9 +70,10 @@ type details for are the ones you got some other way.
 gallery, a description, and where it came from. Mods with a picture get a
 thumbnail in the list, and search looks inside descriptions too.
 
-The app never downloads anything from Nexus or CurseForge. Both sites' terms
-forbid tools that read their pages (Nexus terms §11, Overwolf/CurseForge §3),
-so the information arrives the way you'd move it yourself:
+The app never reads Nexus or CurseForge web pages. Both sites' terms forbid
+tools that do (Nexus terms §11, Overwolf/CurseForge §3). Connect your Nexus
+account (below) and Nexus mods fill themselves in through Nexus's official
+API instead. Otherwise the information arrives the way you'd move it yourself:
 
 - **From the mod page.** *Open mod page*, copy the description, press *Paste
   text*. Right-click a picture, choose *Copy image*, press *Paste image* (or
@@ -86,6 +88,31 @@ so the information arrives the way you'd move it yourself:
 
 Pasting a mod's page address fills in the source and mod ID from the link
 itself; the page isn't opened.
+
+**Connects to Nexus Mods, if you want it to.** Under **… → Nexus Mods**,
+paste the personal API key from your
+[Nexus API keys page](https://next.nexusmods.com/settings/api-keys). Nothing
+is sent to Nexus until you do. Once connected:
+
+- **Updates.** When the app opens it checks your Nexus mods for newer
+  versions. Mods with one get an *update to vX* link on their row and a
+  banner at the top; **… → Nexus Mods → Updates** lists them all. Each check
+  asks Nexus once what changed this month, then asks only about the mods of
+  yours that did. Mods whose Nexus page was removed or hidden are pointed out.
+- **Mod Manager Download.** Turn on *Open the website's Mod Manager Download
+  button here* and that button on any Palworld mod's Files tab opens the app,
+  shows the file, and installs it through the usual install window. If
+  Vortex or Mod Organizer had the button before, turning this off gives it
+  back to them. If the app is already open, the download opens in that
+  window instead of a second copy.
+- **One-click updates for Premium members.** Nexus only lets apps download
+  directly for Premium accounts. For free accounts, *Update* opens the mod's
+  Files tab, where Mod Manager Download finishes the job.
+- **Details.** A newly installed Nexus mod gets its description and main
+  picture from its listing. *Fill in from Nexus* in its info window does
+  the same on demand, and never replaces what you wrote without asking.
+- **Renamed downloads.** A zip whose name no longer carries its Nexus ID is
+  looked up by checksum, so it still links to its page.
 
 For your own mods, what you write and add here goes into *Package for
 sharing*: the description as `DESCRIPTION.md` and the pictures under
@@ -156,12 +183,20 @@ to be fine.
 
 ## Privacy and security
 
-**Nothing leaves your PC.** No account, no telemetry, no analytics. Everything
-the app records (sources, links, pictures, descriptions, receipts, backups)
-stays in `%LOCALAPPDATA%\PalModManager`. The one exception is **Install
-UE4SS / PalSchema**: when you press it, the app asks GitHub for the current
-release and downloads it, and that request carries no information about you
-beyond what any download does.
+**Nothing leaves your PC unless you ask.** No telemetry, no analytics.
+Everything the app records (sources, links, pictures, descriptions,
+receipts, backups) stays in `%LOCALAPPDATA%\PalModManager`. There are two
+exceptions, and both are yours to start:
+
+- **Install UE4SS / PalSchema**: when you press it, the app asks GitHub for
+  the current release and downloads it. That request carries no information
+  about you beyond what any download does.
+- **Nexus Mods**, once you connect an account: requests go to
+  `api.nexusmods.com` with your API key and the ID numbers of the Nexus mods
+  you have installed, and name the app as Nexus asks. Nothing else about your
+  PC or your mods is sent. The key is kept in Windows Credential Manager,
+  never in the app's files, and is only ever sent to `api.nexusmods.com`,
+  never to the servers files are downloaded from. **Disconnect** deletes it.
 
 **Files from strangers are handled as such.**
 
@@ -170,8 +205,10 @@ beyond what any download does.
   file a thousand times over (a zip bomb) is refused before it is opened.
   What 7-Zip unpacks is checked afterwards rather than trusted, including for
   links pointing elsewhere on disk.
-- Downloads only ever come from GitHub over HTTPS, redirects included, and
-  are checked against the SHA-256 GitHub publishes for each release file.
+- Downloads only ever come from GitHub or Nexus Mods over HTTPS, redirects
+  included. GitHub files are checked against the SHA-256 GitHub publishes;
+  Nexus files against the size Nexus lists, and their MD5 is looked up on
+  Nexus, which must name the very file that was asked for.
 - Links only open if they are web pages. A mod page link that is really a
   program path, a `file://` address or a custom protocol is refused.
 - Pictures are re-encoded when added, which strips camera and GPS data,
@@ -255,6 +292,11 @@ python palmods.py doctor --fix              # repair a conflicting UE4SS
 python palmods.py check                     # UE4SS, updates, conflicts, hotkeys, leftovers
 python palmods.py backup create             # back up saves; also: list, restore <id>
 python palmods.py export --text             # your modlist, ready to paste
+python palmods.py nexus connect             # paste your Nexus API key
+python palmods.py nexus updates             # which Nexus mods have a newer version
+python palmods.py nexus get <nxm-link|id>   # download from Nexus and install
+python palmods.py nexus fill <name>         # description and picture from Nexus
+python palmods.py nexus handler on          # Mod Manager Download opens this app
 ```
 
 ## Doctor
@@ -284,6 +326,9 @@ Everything this tool generates lives in `%LOCALAPPDATA%\PalModManager`:
 | `state.json` | Which build each mod last loaded on, per install |
 | `backups\` | Save-game backups, one folder per install |
 | `media\` | Mod pictures and their thumbnails, one folder per mod |
+| `nexus.json` | What Nexus said about your mods, and your account name (never the key) |
+| `downloads\nexus\` | The last few files downloaded from Nexus, for reinstalling |
+| `inbox\`, `running.json` | Links and files handed to the copy of the app that's already open |
 
 Nothing is written next to the program. The release is a one-file build, and
 that folder is a temp directory deleted when the app closes.
@@ -311,6 +356,9 @@ offered there because it could never apply before the next launch anyway.
 | `palicons.py` | Icons and the app mark, drawn in code; no image files |
 | `paltext.py` | Wording helpers (`plural`) |
 | `palget.py` | Downloading UE4SS and PalSchema from their GitHub releases |
+| `palnexus.py` | Nexus Mods API: key, updates, details, nxm:// links, downloads |
+| `palnexuswin.py` | The Nexus windows: connect, download, updates |
+| `palhandoff.py` | Passing links and files to a copy of the app that's already open |
 | `palmedia.py` | Mod descriptions and pictures: clipboard, files, archives, links |
 | `palinfo.py` | The mod info window and picture viewer |
 | `ingame/` | The in-game Lua panel |
