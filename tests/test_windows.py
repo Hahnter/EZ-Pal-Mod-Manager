@@ -69,11 +69,28 @@ bw._backup(); pump(0.2)
 check("backup from window", len(palsafety.list_backups(game)) == 1)
 bw.destroy()
 
+old = win64 / "ue4ss.pmm-old-20261001-1200"         # parked by 1.0.0
+lua_mod(old / "Mods", "FastTravel")
+lua_mod(old / "Mods", "LostMod")
 cl = W.CleanupWindow(app); pump(0.3)
-check("cleanup finds the orphaned config",
-      [i["kind"] for i in cl.items] == ["orphaned config"], [i["kind"] for i in cl.items])
+check("cleanup finds the orphaned config and the old UE4SS holding a mod",
+      [i["kind"] for i in cl.items] == ["orphaned config", "old UE4SS with mods"],
+      [i["kind"] for i in cl.items])
+
+
+def all_widgets(widget):
+    out = []
+    for c in widget.winfo_children():
+        out.append(c); out.extend(all_widgets(c))
+    return out
+
+
+pills = {p._txt: p._fg for p in all_widgets(cl) if isinstance(p, W.Pill)}
+check("old UE4SS holding a mod has a warning pill",
+      pills.get("old UE4SS with mods") == W.WARN, pills)
 cl._clean(); pump(0.3)
 check("cleanup removes it", not (paks / "LogicMods/Ghost.modconfig.json").exists())
+check("cleanup leaves the old UE4SS holding a mod", (old / "Mods/LostMod").is_dir())
 cl.destroy()
 
 lw = W.LogWindow(app); pump(0.3)

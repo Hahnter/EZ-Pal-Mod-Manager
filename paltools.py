@@ -17,7 +17,9 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+import palmods
 import palregistry
+from paltext import plural
 
 
 # ==========================================================================
@@ -68,18 +70,66 @@ def _size(path):
         return 0
 
 
+def _is_mod_dir(d):
+    """The test palmods.scan_ue4ss uses: a mod folder carries one of these."""
+    return any((d / s).exists() for s in ("enabled.txt", "enabled.txt.disabled",
+                                          "Scripts/main.lua", "dlls/main.dll"))
+
+
+def _parked_mods(parked, data):
+    """Mods in a parked UE4SS that aren't installed now, by name.
+
+    Installing UE4SS with 1.0.0 parked the old ue4ss folder with its Mods
+    still inside, so for some people this is the only copy of their mods.
+    """
+    mods = parked / "Mods"
+    if not mods.is_dir():
+        return []
+    have = {m["name"].casefold() for m in data["ue4ss_mods"]}
+    out = sorted((d.name for d in mods.iterdir()
+                  if d.is_dir() and d.name not in palmods.BUILTIN
+                  and d.name.casefold() not in have and _is_mod_dir(d)),
+                 key=str.casefold)
+    # A PalSchema mod is any folder in its mods\ or disabled-mods\.
+    have = {s["name"].casefold() for s in data.get("palschema_mods", [])}
+    schema = mods / "PalSchema"
+    out += sorted({d.name for sub in ("mods", palmods.PALSCHEMA_OFF)
+                   if (schema / sub).is_dir()
+                   for d in (schema / sub).iterdir()
+                   if d.is_dir() and d.name.casefold() not in have},
+                  key=str.casefold)
+    return out
+
+
+def _holds(names, most=3):
+    """'It holds A, B and C, which aren't installed now.'
+
+    Past `most`, the rest are counted. One more is named instead, since
+    '1 other mod' takes as much room as its name.
+    """
+    if len(names) > most + 1:
+        return (f"It holds {', '.join(names[:most])} and "
+                f"{plural(len(names) - most, 'other mod')} that aren't "
+                f"installed now.")
+    listed = (names[0] if len(names) == 1
+              else f"{', '.join(names[:-1])} and {names[-1]}")
+    verb = "isn't" if len(names) == 1 else "aren't"
+    return f"It holds {listed}, which {verb} installed now."
+
+
 def find_leftovers(paths, data):
     """Things on disk that belong to no installed mod.
 
     `checked` marks what is safe to remove without a second thought. Backups
     that Repair or the installer made are listed but left unticked: they are
-    inert, but someone may still want them.
+    inert, but someone may still want them. A parked UE4SS holding mods that
+    aren't installed now also carries their names in `missing`.
     """
     items = []
 
-    def add(path, kind, why, checked):
+    def add(path, kind, why, checked, **extra):
         items.append({"path": str(path), "kind": kind, "why": why,
-                      "checked": checked, "size": _size(path)})
+                      "checked": checked, "size": _size(path), **extra})
 
     game, win64, paks = paths["game"], paths["win64"], paths["paks"]
     pak_names = {p["name"].lower() for p in data["pak_mods"]}
@@ -124,8 +174,13 @@ def find_leftovers(paths, data):
             add(d, "old UE4SS backup", "backup of an earlier UE4SS install", False)
     # The UE4SS installer keeps whatever it replaced, rather than deleting it.
     for d in sorted(win64.glob("*.pmm-old-*")):
-        add(d, "old UE4SS", "the UE4SS this app replaced, kept in case you "
-                             "want it back", False)
+        missing = _parked_mods(d, data) if d.is_dir() else []
+        if missing:
+            add(d, "old UE4SS with mods", _holds(missing), False,
+                missing=missing)
+        else:
+            add(d, "old UE4SS", "the UE4SS this app replaced, kept in case you "
+                                 "want it back", False)
 
     for _, root in paths["mod_roots"]:
         for d in sorted(root.iterdir()):

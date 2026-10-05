@@ -28,6 +28,13 @@
   `Pal\Binaries\Win64\ue4ss.pmm-old-<date>\Mods`. Copy your mod folders from
   there back into `ue4ss\Mods`.
 
+**Fixes**
+
+- When an old UE4SS folder (`ue4ss.pmm-old-<date>`) holds mods that aren't
+  installed now, **Clean up leftovers** labels it *old UE4SS with mods* and
+  names those mods. Installing UE4SS with 1.0.0 moved your mods into that
+  folder, so it may hold your only copy of them.
+
 ## 1.0.0 - first public release
 
 **It can set up UE4SS and PalSchema for you**
