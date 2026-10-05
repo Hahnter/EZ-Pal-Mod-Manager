@@ -70,12 +70,6 @@ def _size(path):
         return 0
 
 
-def _is_mod_dir(d):
-    """The test palmods.scan_ue4ss uses: a mod folder carries one of these."""
-    return any((d / s).exists() for s in ("enabled.txt", "enabled.txt.disabled",
-                                          "Scripts/main.lua", "dlls/main.dll"))
-
-
 def _parked_mods(parked, data):
     """Mods in a parked UE4SS that aren't installed now, by name.
 
@@ -88,7 +82,7 @@ def _parked_mods(parked, data):
     have = {m["name"].casefold() for m in data["ue4ss_mods"]}
     out = sorted((d.name for d in mods.iterdir()
                   if d.is_dir() and d.name not in palmods.BUILTIN
-                  and d.name.casefold() not in have and _is_mod_dir(d)),
+                  and d.name.casefold() not in have and palmods.is_mod_dir(d)),
                  key=str.casefold)
     # A PalSchema mod is any folder in its mods\ or disabled-mods\.
     have = {s["name"].casefold() for s in data.get("palschema_mods", [])}
