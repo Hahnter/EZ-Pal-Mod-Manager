@@ -453,6 +453,15 @@ def load_toggles(mods_dir, log=None):
     return toggles
 
 
+# A real mod folder always carries one of these.
+MOD_SIGNS = ("enabled.txt", "enabled.txt.disabled",
+             "Scripts/main.lua", "dlls/main.dll")
+
+
+def is_mod_dir(d):
+    return any((d / s).exists() for s in MOD_SIGNS)
+
+
 def scan_ue4ss(paths, log):
     """Scan every UE4SS mod folder, not just the active one.
 
@@ -469,12 +478,7 @@ def scan_ue4ss(paths, log):
         lists = read_mod_lists(rootdir)
         used = list_in_use(rootdir, root_log)
         for d in sorted(rootdir.iterdir()):
-            if not d.is_dir() or d.name == "shared":
-                continue
-            # A real mod folder always carries one of these.
-            if not any((d / s).exists() for s in
-                       ("enabled.txt", "enabled.txt.disabled",
-                        "Scripts/main.lua", "dlls/main.dll")):
+            if not d.is_dir() or d.name == "shared" or not is_mod_dir(d):
                 continue
             if d.name in seen:
                 seen[d.name]["also_in"].append(label)

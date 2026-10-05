@@ -10,6 +10,24 @@
   now has its own folder. Installs in it that no test has rebuilt for a week
   are deleted.
 
+**Fixes**
+
+- Installing UE4SS over an existing `ue4ss` folder moved your mods aside
+  with the old UE4SS, into `ue4ss.pmm-old-<date>`. The main list then showed
+  only UE4SS's built-in mods. Now everything in `ue4ss\Mods` comes back into
+  the new UE4SS at the same paths: your mods and their settings, PalSchema
+  with its mods (on and off), BPModLoaderMod's `load_order.txt` (the new
+  release's copy lands beside it as `.new`), and which mods are on in
+  `mods.txt` and `mods.json`. Entries the new release adds to those two
+  lists are added to yours. The install says what it kept.
+- `ue4ss.pmm-old-<date>` still holds the whole old UE4SS, so you can go back
+  to it. Removing it with **Clean up leftovers** no longer removes your only
+  copy of your mods.
+- If installing UE4SS stops part way, the old one is put back as it was.
+- If your mods disappeared after installing UE4SS with 1.0.0, they are in
+  `Pal\Binaries\Win64\ue4ss.pmm-old-<date>\Mods`. Copy your mod folders from
+  there back into `ue4ss\Mods`.
+
 ## 1.0.0 - first public release
 
 **It can set up UE4SS and PalSchema for you**
