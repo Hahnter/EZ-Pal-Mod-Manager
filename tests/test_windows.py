@@ -148,9 +148,15 @@ check.section("a mod switched on since the game last ran")
 lua_mod(mods, "FreshMod", enabled=False)
 app.reload(full=True)
 pump(0.3)
-app._set_row("ue4ss:FreshMod", True)
+app._toggled("ue4ss:FreshMod", True)                # as a click on its switch
+check("one change waiting: it, not they",
+      app.status.cget("text") == "1 change not applied. It takes effect the next "
+                                 "time you play.", app.status.cget("text"))
 app.apply()
 pump(0.3)
+check("one change applied: it, not they",
+      app.status.cget("text") == "Applied 1 change. It takes effect the next time "
+                                 "you play.", app.status.cget("text"))
 states = {e["id"]: (e["state"], e["health"]) for e in app._entries_cache}
 check("switched on: starts next launch, not a problem",
       states.get("ue4ss:FreshMod") == ("starts next launch", "working"),

@@ -108,7 +108,8 @@
   until you play. Before, it read *Didn't start* straight away and counted
   as a problem, though the game hadn't run since it was switched on. One
   switched on while Palworld is running waits for the run after that one.
-- "*X* overrides 1 of its files", not "1 of its file".
+- "*X* overrides 1 of its files", not "1 of its file", and "Applied 1 change.
+  It takes effect…", not "They take effect…".
 - Counts agree with their verbs: "1 mod hasn't loaded", "1 mod here needs
   PalSchema", "1 file isn't part of a mod", "1 needs attention".
 

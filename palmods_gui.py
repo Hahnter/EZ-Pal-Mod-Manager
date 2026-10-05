@@ -436,7 +436,9 @@ class InstallWindow(tk.Toplevel):
         queued = bool(self.app._install_queue)
         self._close(advance=False)
         self.app.reload(full=True)
-        self.app.flash(f"Installed {plural(len(chosen), 'mod')}. They load the next time you play.")
+        self.app.flash(f"Installed {plural(len(chosen), 'mod')}. "
+                       f"{'It loads' if len(chosen) == 1 else 'They load'} the next "
+                       f"time you play.")
         # With more downloads queued, don't stop for a dialog after each one.
         if not queued:
             messagebox.showinfo("EZ Pal Mod Manager",
@@ -1771,7 +1773,8 @@ class App:
         lbl.config(text=f"Problems  {problems}" if problems else "Problems")
         if pend:
             msg = (f"{plural(len(pend), 'change')} not applied. "
-                   f"They take effect the next time you play.")
+                   f"{'It takes' if len(pend) == 1 else 'They take'} effect the "
+                   f"next time you play.")
             fg = TEXT
             self.apply_btn.pack(side="right")
             self.revert_btn.pack(side="right", padx=8)
@@ -1826,10 +1829,12 @@ class App:
                                  + "\n".join(failed))
         elif self._running:
             self.flash(f"Applied {plural(len(changes), 'change')}. Palworld is running, "
-                       f"so they take effect the next time it starts.")
+                       f"so {'it takes' if len(changes) == 1 else 'they take'} effect "
+                       f"the next time it starts.")
         else:
             self.flash(f"Applied {plural(len(changes), 'change')}. "
-                       f"They take effect the next time you play.")
+                       f"{'It takes' if len(changes) == 1 else 'They take'} effect "
+                       f"the next time you play.")
 
     def play(self):
         """Start the game with a safety net, then report back when it closes."""
@@ -2079,7 +2084,8 @@ class App:
                    | {e["name"] for e in self._entries_cache})
         missing = sorted(set(pr["known"]) - present)
         self._recount()
-        msg = f"Profile '{name}': {plural(staged, 'change')} ready. Press Apply changes to use them."
+        msg = (f"Profile '{name}': {plural(staged, 'change')} ready. Press Apply "
+               f"changes to use {'it' if staged == 1 else 'them'}.")
         if missing:
             msg += f" ({plural(len(missing), 'mod')} from it no longer installed.)"
         self.status.config(text=msg, fg=PEND)

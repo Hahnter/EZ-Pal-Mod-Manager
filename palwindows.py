@@ -878,7 +878,8 @@ class CompareWindow(Window):
                     staged += row["was"] != value
         app._recount()
         app.status.config(text=f"{plural(staged, 'change')} ready to match their setup. "
-                               f"Press Apply changes to use them.", fg=TEXT)
+                               f"Press Apply changes to use "
+                               f"{'it' if staged == 1 else 'them'}.", fg=TEXT)
         self.destroy()
 
 
