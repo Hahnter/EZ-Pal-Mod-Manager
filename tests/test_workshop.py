@@ -92,6 +92,21 @@ raw = f.read_bytes()
 check("and written back as UTF-16",
       raw.startswith(b"\xff\xfe")
       and "ActiveModList=A\r\nActiveModList=B\r\n" in raw.decode("utf-16"), raw[:40])
+# As Palworld 1.0.5 writes it after Save in Mod Management, with no mod on.
+real = (b"[PalModSettings]\r\nbGlobalEnableMod=True\r\n"
+        b"WorkshopRootDir=D:\\SteamLibrary\\steamapps\\workshop\\content\\1623730\r\n"
+        b"ConfigVersion=1.0\r\nbNeedShowErrorOnNextStart=True\r\n")
+f.write_bytes(real)
+s = palworkshop.read_settings(g)
+check("the file Palworld 1.0.5 writes is read",
+      s["global_on"] and s["active"] == []
+      and s["root"] == "D:\\SteamLibrary\\steamapps\\workshop\\content\\1623730", s)
+palworkshop.set_active(g, "DarkMagicianGirl", True)
+check("a mod switched on in it goes in the section; the game's own lines stay",
+      f.read_bytes() == real + b"ActiveModList=DarkMagicianGirl\r\n", f.read_bytes())
+palworkshop.set_active(g, "DarkMagicianGirl", False)
+check("and switched off, it is exactly as the game wrote it", f.read_bytes() == real,
+      f.read_bytes())
 f.write_bytes(b"[/Script/Pal.PalModSettings]\r\nbGlobalEnableMod=True\r\nActiveModList=A\r\n")
 palworkshop.set_active(g, "B", True)
 check("the section named as Unreal names a class's is the same section",
