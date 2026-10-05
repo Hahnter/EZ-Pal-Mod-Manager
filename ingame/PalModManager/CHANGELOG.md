@@ -70,6 +70,20 @@
   leaves the folder alone. This also applies to paks installed by earlier
   versions.
 
+- Updating a PalSchema mod while it was switched off put the new version in
+  `PalSchema\mods` and left the old one in `PalSchema\disabled-mods`. With a
+  copy in both folders, the mod could no longer be switched on or off. The
+  update now replaces the copy you have and keeps your settings in it, the
+  same way as for other mods.
+- PalSchema mods now follow *Turn on after installing*. With it unticked, the
+  mod is installed switched off; before, it was switched on either way. With
+  it ticked (the default), updating a switched-off mod turns it back on, as it
+  already did for UE4SS mods.
+- If an earlier version already left two copies, installing the mod again
+  removes the copy that is still exactly as it was installed and updates the
+  other one. If both copies have changes, the install skips that mod and asks
+  you to delete one of them.
+
 ## 1.0.0 - first public release
 
 **It can set up UE4SS and PalSchema for you**
