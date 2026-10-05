@@ -142,5 +142,27 @@ check("play button restored", "Play" in app.play_btn.cget("text")
 check("regression reported after playing",
       "FastTravel" in app._data["patch"]["regressed"], app._data["patch"])
 
+check.section("a mod switched on since the game last ran")
+# Before the game has run with it, a mod can't have started, so it mustn't be
+# reported as one that didn't: that read as a problem the moment it was on.
+lua_mod(mods, "FreshMod", enabled=False)
+app.reload(full=True)
+pump(0.3)
+app._set_row("ue4ss:FreshMod", True)
+app.apply()
+pump(0.3)
+states = {e["id"]: (e["state"], e["health"]) for e in app._entries_cache}
+check("switched on: starts next launch, not a problem",
+      states.get("ue4ss:FreshMod") == ("starts next launch", "working"),
+      states.get("ue4ss:FreshMod"))
+# The game runs and it still doesn't start: now that is worth saying.
+write_log(win64, ["BaseDoorControl", "PalInsightSettings"], when_offset=60)
+app.reload(full=True)
+pump(0.3)
+states = {e["id"]: (e["state"], e["health"]) for e in app._entries_cache}
+check("after a run that didn't start it: didn't start",
+      states.get("ue4ss:FreshMod") == ("didn't start", "problem"),
+      states.get("ue4ss:FreshMod"))
+
 root.destroy()
 check.finish(errors)

@@ -283,8 +283,9 @@ class InstallWindow(tk.Toplevel):
                      justify="left", wraplength=660).pack(fill="x", padx=16, pady=(8, 0))
         ignored = [f for f in plan["skipped"] if f not in kept]
         if ignored:
+            are = "isn't" if len(ignored) == 1 else "aren't"
             tk.Label(self.body,
-                     text=f"{plural(len(ignored), 'file')} in the archive aren't "
+                     text=f"{plural(len(ignored), 'file')} in the archive {are} "
                           f"part of a mod and will be skipped "
                           f"({', '.join(ignored[:3])}"
                           f"{'…' if len(ignored) > 3 else ''})",
@@ -847,6 +848,8 @@ class App:
         """
         data = self._data
         reg = data["registry"]
+        # Switched on since the game last ran: they haven't had a chance yet.
+        waiting = set(data["patch"].get("waiting", ()))
         conflicts, keys, patch = data["conflicts"], data["keybinds"], data["patch"]
         out = []
 
@@ -916,6 +919,8 @@ class App:
                 state, colour, health = "off", FAINT, "off"
             elif m["loaded"]:
                 state, colour, health = "working", GOOD, "working"
+            elif palregistry.mod_id("ue4ss", m["name"]) in waiting:
+                state, colour, health = "starts next launch", DIM, "working"
             else:
                 state, colour, health = "didn't start", WARN, "problem"
             notes = list(m["failures"]) if m["enabled"] else []
@@ -955,9 +960,12 @@ class App:
             elif p["disabled"]:
                 state, colour, health = "off", FAINT, "off"
             elif p["folder"] == "LogicMods":
-                state, colour, health = (("working", GOOD, "working")
-                                         if p["loaded"]
-                                         else ("didn't start", WARN, "problem"))
+                if p["loaded"]:
+                    state, colour, health = "working", GOOD, "working"
+                elif palregistry.mod_id("pak", p["name"]) in waiting:
+                    state, colour, health = "starts next launch", DIM, "working"
+                else:
+                    state, colour, health = "didn't start", WARN, "problem"
             else:
                 # Content paks never write to the log, so "on" is all anyone
                 # can truthfully say without looking in game.
@@ -1280,7 +1288,8 @@ class App:
 
     STATE_ICONS = {"working": "check", "didn't start": "alert", "error": "error",
                    "wrong folder": "alert", "worked before update": "clock",
-                   "on": "dot", "needs PalSchema": "alert", "PalSchema off": "alert"}
+                   "on": "dot", "needs PalSchema": "alert", "PalSchema off": "alert",
+                   "starts next launch": "play"}
 
     def _row(self, e):
         base = PROBLEM_BG if e["health"] == "problem" else SURFACE
@@ -1597,7 +1606,8 @@ class App:
         else:
             msg = f"{plural(total, 'mod')}, {on} on"
             if problems:
-                msg += f", {problems} need attention"
+                need = "needs" if problems == 1 else "need"
+                msg += f", {problems} {need} attention"
             fg = DIM
             self.apply_btn.pack_forget()
             self.revert_btn.pack_forget()
@@ -1620,13 +1630,22 @@ class App:
         changes = self._pending()
         if not changes:
             return
-        failed = []
+        failed, switched_on = [], []
         for mid, on in changes:
             kind, name = palregistry.split_id(mid)
             try:
                 palmods.set_enabled(name, on, kind)
             except OSError as exc:
                 failed.append(f"{name}: {exc}")
+            else:
+                if on:
+                    switched_on.append(mid)
+        # Until the game runs, these read as starting next launch, not as
+        # having failed to start in a session that ran before they were on.
+        try:
+            palsafety.switched_on(self._paths["game"], switched_on)
+        except OSError:
+            pass
         self.reload()
         if failed:
             messagebox.showerror("EZ Pal Mod Manager",
@@ -1748,8 +1767,9 @@ class App:
         if launched:
             palwindows.SessionWindow(self, minutes)
         else:
+            need = "needs" if problems == 1 else "need"
             self.flash("Palworld closed. Mod status refreshed"
-                       + (f", {problems} need attention" if problems else ""))
+                       + (f", {problems} {need} attention" if problems else ""))
 
     def revert(self):
         for mid, r in self.rows.items():

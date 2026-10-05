@@ -224,6 +224,7 @@ set of pictures.
 | **working** | Confirmed in `UE4SS.log`: it started last time you played. |
 | **worked before update** | It started, but on the game version before the latest patch. Play once to confirm it still does. |
 | **didn't start** | Switched on, but the last session never started it. |
+| **starts next launch** | Switched on or installed since you last played, so it hasn't had a chance to start yet. |
 | **error** | It tried to start and failed; the reason is on the row. |
 | **off** | Switched off. Won't load next launch. |
 | **on** | A pak mod that's switched on. Pak mods never write to the log, so whether it works can only be seen in game. |

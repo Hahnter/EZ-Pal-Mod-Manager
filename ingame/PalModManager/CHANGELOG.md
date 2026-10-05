@@ -72,6 +72,14 @@
   Your home folder appears in it as `%USERPROFILE%`, so your Windows user name
   stays out of anything you share.
 
+**Reading the list**
+
+- A mod you switch on, or install switched on, reads *Starts next launch*
+  until you play. Before, it read *Didn't start* straight away and counted
+  as a problem, though the game hadn't run since it was switched on.
+- Counts agree with their verbs: "1 mod hasn't loaded", "1 mod here needs
+  PalSchema", "1 file isn't part of a mod", "1 needs attention".
+
 **Command line**
 
 - `enable`, `disable` and `uninstall` accept `ue4ss:<name>`, `pak:<name>` and

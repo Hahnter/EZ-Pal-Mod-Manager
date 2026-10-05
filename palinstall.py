@@ -27,6 +27,7 @@ from paltext import plural
 import palmods
 import palpaths
 import palregistry
+import palsafety
 
 ARCHIVE_SUFFIXES = {".zip", ".7z", ".rar"}
 
@@ -620,6 +621,13 @@ def apply(plan, components=None, enable=True, backup=True, link=None):
             results.append("Kept from the download: " + " and ".join(bits))
     if page and installed:
         results.append("Linked to " + describe_link(page))
+    # Installed switched on, they haven't had a chance to start yet: until
+    # the game runs, the list says they start next launch.
+    if enable and installed:
+        try:
+            palsafety.switched_on(game, [component_id(c) for c in installed])
+        except OSError:
+            pass
     return results
 
 

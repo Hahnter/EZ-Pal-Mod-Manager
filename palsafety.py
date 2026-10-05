@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -111,6 +112,10 @@ def observe(paths, data):
         st["run_seen"] = log_mtime
         for name in loaded:
             verified[name] = ran_on
+    # A mod switched on before the last run has had its chance to start.
+    switched = st.setdefault("switched_on", {})
+    for mod in [m for m, when in switched.items() if log_mtime and when <= log_mtime]:
+        del switched[mod]
     _save_state(state)
 
     # What needs saying.
@@ -140,8 +145,29 @@ def observe(paths, data):
         "regressed": {n: label_of(verified[n]) for n in loggable_on
                       if not updated and n not in loaded_set
                       and verified.get(n) not in (None, cur["id"])},
+        # Mods switched on since the last run, by mod id ('ue4ss:Name'). The
+        # game hasn't started since, so they can't have loaded yet.
+        "waiting": sorted(switched),
     }
     return report
+
+
+def switched_on(game, mod_ids):
+    """Note that these mods were just switched on, or installed switched on.
+
+    Until the game next runs they haven't had a chance to start, so they read
+    as waiting for the next launch rather than as having failed to start.
+    """
+    mod_ids = list(mod_ids)
+    if not mod_ids:
+        return
+    state = _load_state()
+    st = state.setdefault("installs", {}).setdefault(palpaths.install_key(game), {})
+    switched = st.setdefault("switched_on", {})
+    now = time.time()
+    for mod in mod_ids:
+        switched[mod] = now
+    _save_state(state)
 
 
 # ==========================================================================

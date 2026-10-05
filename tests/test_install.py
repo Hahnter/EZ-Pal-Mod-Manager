@@ -55,6 +55,9 @@ check("lua mod installed and enabled",
       (win64 / "ue4ss/Mods/CoolMod/Scripts/main.lua").is_file()
       and (win64 / "ue4ss/Mods/CoolMod/enabled.txt").is_file())
 check("blueprint pak routed to LogicMods", (paks / "LogicMods/CoolModBP_P.pak").is_file())
+waiting = scan(game)[1]["patch"]["waiting"]
+check("both start next launch: installed on, not yet run",
+      {"ue4ss:CoolMod", "pak:CoolModBP_P"} <= set(waiting), waiting)
 meta = palregistry.get("CoolMod")
 check("Nexus id/version read from the file name",
       meta.get("source") == "Nexus" and meta.get("id") == 4821 and meta.get("version") == "1.2.0",
