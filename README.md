@@ -288,6 +288,7 @@ Everything this tool generates lives in `%LOCALAPPDATA%\PalModManager`:
 | `profiles.json` | Saved sets of enabled mods |
 | `manifest.json` | Regenerated each scan; the in-game panel reads this |
 | `state.json` | Which build each mod last loaded on, per install |
+| `error.log` | Details of anything that went wrong, if anything has |
 | `backups\` | Save-game backups, one folder per install |
 | `media\` | Mod pictures and their thumbnails, one folder per mod |
 
@@ -300,6 +301,11 @@ power cut can't leave half a file behind, and the version before is kept as
 `<name>.bak`. A file that won't read is never written over: it's kept as
 `<name>.corrupt-<time>` and the `.bak` takes its place. UE4SS's `mods.txt` and
 `mods.json` are saved the same way when you switch a mod on or off.
+
+When something goes wrong in the app itself, it says so and writes the details
+to `error.log`. *Copy details* puts them on the clipboard for a bug report. In
+both, your home folder appears as `%USERPROFILE%`, so your Windows user name
+stays out of anything you share.
 
 ## The in-game panel
 
