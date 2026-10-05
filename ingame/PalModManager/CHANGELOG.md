@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+**Fixes**
+
+- Two copies of the repo (git worktrees) can run the tests at the same time.
+  Before, every copy built its throwaway installs in one shared temp folder,
+  so one run could delete an install another run was still using. Each copy
+  now has its own folder. Installs in it that no test has rebuilt for a week
+  are deleted.
+
 ## 1.0.0 - first public release
 
 **It can set up UE4SS and PalSchema for you**
