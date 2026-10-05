@@ -54,6 +54,23 @@ notes = {e["name"]: e["note"] for e in app._entries_cache}
 check("hotkey note on both mods", "F6, F7 also bound by PalInsightSettings" in notes["BaseDoorControl"],
       notes["BaseDoorControl"])
 check("conflict loser noted", "zzOutfit_P overrides" in notes["Misty_P"], notes["Misty_P"])
+waiting = len(app._data["patch"]["unverified"])
+check("the update banner counts in words",
+      waiting > 1 and any(f"{waiting} mods haven't loaded" in b for b in banners), banners)
+
+# One mod reads as one: "1 mod hasn't", never "1 mod haven't".
+real = dict(app._data)
+app._data["patch"] = dict(real["patch"], unverified=["FastTravel"])
+app._data["palschema_mods"] = [{"name": "Rates", "enabled": True, "framework": False}]
+app.render()
+pump(0.2)
+banners = [w.winfo_children()[-1].cget("text") for w in app.warnbox.winfo_children()]
+check("one mod hasn't loaded", any("1 mod hasn't loaded" in b for b in banners), banners)
+check("one mod needs PalSchema", any("1 mod here needs PalSchema" in b for b in banners),
+      banners)
+app._data.update(real)
+app.render()
+pump(0.2)
 
 check.section("windows")
 cw = W.ConflictsWindow(app); pump(0.3)

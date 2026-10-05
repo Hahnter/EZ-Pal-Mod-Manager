@@ -1125,8 +1125,9 @@ class App:
         orphans = [s["name"] for s in data.get("palschema_mods", [])
                    if s["enabled"] and not s["framework"]]
         if orphans:
+            need = "needs" if len(orphans) == 1 else "need"
             self._banner(
-                f"{plural(len(orphans), 'mod')} here need PalSchema, which "
+                f"{plural(len(orphans), 'mod')} here {need} PalSchema, which "
                 f"isn't installed: {', '.join(orphans[:3])}"
                 + (" and more." if len(orphans) > 3 else "."),
                 "bad", [("Install PalSchema", self.get_palschema)])
@@ -1136,7 +1137,8 @@ class App:
             n = len(patch["unverified"])
             text = (f"Palworld updated to {patch['build']} since your mods last ran "
                     f"(on {patch['last_run_build']}). ")
-            text += (f"{plural(n, 'mod')} haven't loaded on this version yet. Play "
+            have = "hasn't" if n == 1 else "haven't"
+            text += (f"{plural(n, 'mod')} {have} loaded on this version yet. Play "
                      f"once to check." if n else "Play once to check your mods still work.")
             self._banner(text, "warn", [("Back up saves", self.open_backups),
                                         ("Play", self.play)])
