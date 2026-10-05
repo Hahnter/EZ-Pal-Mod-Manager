@@ -14,12 +14,14 @@ Tkinter only, so it runs on a stock Python and freezes to a single .exe.
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
 import time
 import tkinter as tk
 import tkinter.font as tkfont
+import traceback
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog
 
@@ -32,6 +34,8 @@ import palpaths
 import palregistry
 import palsafety
 import palwindows
+import palworkshop
+from paltext import and_list
 
 from palui import (open_link, BG, SURFACE, RAISED, HOVER, LINE, TEXT, DIM, FAINT, ACCENT, GOOD, WARN, BAD, PEND,
                    ON_ACCENT, ACCENT_HI, PROBLEM_BG, TITLE_FONT, BODY_FONT, STRONG_FONT,
@@ -263,7 +267,7 @@ class InstallWindow(tk.Toplevel):
 
         clashes = palinstall.conflicts(plan)
         for c in comps:
-            self._component(c, clashes.get(c["name"], []))
+            self._component(c, clashes.get(palinstall.component_id(c), []))
 
         for w in plan["warnings"]:
             tk.Label(self.body, text="  !  " + w, bg=SURFACE, fg=WARN,
@@ -281,8 +285,9 @@ class InstallWindow(tk.Toplevel):
                      justify="left", wraplength=660).pack(fill="x", padx=16, pady=(8, 0))
         ignored = [f for f in plan["skipped"] if f not in kept]
         if ignored:
+            are = "isn't" if len(ignored) == 1 else "aren't"
             tk.Label(self.body,
-                     text=f"{plural(len(ignored), 'file')} in the archive aren't "
+                     text=f"{plural(len(ignored), 'file')} in the archive {are} "
                           f"part of a mod and will be skipped "
                           f"({', '.join(ignored[:3])}"
                           f"{'…' if len(ignored) > 3 else ''})",
@@ -299,7 +304,9 @@ class InstallWindow(tk.Toplevel):
         top.pack(fill="x", padx=12, pady=(10, 2))
 
         var = tk.BooleanVar(value=True)
-        self.vars[c["name"]] = (var, c)
+        # By kind and name: a hybrid mod's Lua and PalSchema halves often
+        # share a folder name, and each gets its own checkbox.
+        self.vars[palinstall.component_id(c)] = (var, c)
         tk.Checkbutton(top, variable=var, bg=RAISED, fg=TEXT,
                        activebackground=RAISED, activeforeground=TEXT,
                        selectcolor=RAISED, bd=0, highlightthickness=0,
@@ -414,7 +421,7 @@ class InstallWindow(tk.Toplevel):
             return str(dest)
 
     def _install(self):
-        chosen = [c for name, (var, c) in self.vars.items() if var.get()]
+        chosen = [c for var, c in self.vars.values() if var.get()]
         if not chosen:
             messagebox.showinfo("EZ Pal Mod Manager", "Nothing selected.", parent=self)
             return
@@ -429,7 +436,9 @@ class InstallWindow(tk.Toplevel):
         queued = bool(self.app._install_queue)
         self._close(advance=False)
         self.app.reload(full=True)
-        self.app.flash(f"Installed {plural(len(chosen), 'mod')}. They load the next time you play.")
+        self.app.flash(f"Installed {plural(len(chosen), 'mod')}. "
+                       f"{'It loads' if len(chosen) == 1 else 'They load'} the next "
+                       f"time you play.")
         # With more downloads queued, don't stop for a dialog after each one.
         if not queued:
             messagebox.showinfo("EZ Pal Mod Manager",
@@ -843,13 +852,21 @@ class App:
         """
         data = self._data
         reg = data["registry"]
+        # Switched on since the game last ran: they haven't had a chance yet.
+        waiting = set(data["patch"].get("waiting", ()))
         conflicts, keys, patch = data["conflicts"], data["keybinds"], data["patch"]
         out = []
 
-        def safety_notes(name, on):
-            """(notes, warn, problem) from conflicts, hotkeys and patches."""
+        def safety_notes(name, on, kind):
+            """(notes, warn, problem) from conflicts, hotkeys and patches.
+
+            File conflicts are between paks and hotkeys belong to UE4SS mods,
+            so a row only hears about its own kind, even when a mod of
+            another kind has the same name.
+            """
             notes, warn, problem = [], False, False
-            for idx in conflicts["by_mod"].get(name, []):
+            paks = kind == "pak"
+            for idx in (conflicts["by_mod"].get(name, []) if paks else []):
                 c = conflicts["pairs"][idx]
                 other = c["mods"][1] if c["mods"][0] == name else c["mods"][0]
                 n = c["assets"]
@@ -860,22 +877,23 @@ class App:
                         notes.append(f"overrides {plural(n, 'file')} also in {other}")
                         warn = True
                     else:
-                        notes.append(f"{other} overrides {n} of its {'file' if n == 1 else 'files'}"
+                        notes.append(f"{other} overrides {n} of its files"
                                      + ("" if c["sure"] else " (likely)"))
                         problem = True
                 else:
                     notes.append(f"would clash with {other} over {plural(n, 'file')} "
                                  f"if that is turned on")
-            for what in (on and data.get("core_overrides", {}).get(name)) or []:
+            for what in (on and paks and data.get("core_overrides", {}).get(name)) or []:
                 notes.append(f"replaces {what}, so a game update can stop it "
                              f"loading or crash the game")
                 warn = True
-            if on and name in conflicts["no_patch_suffix"]:
+            if on and paks and name in conflicts["no_patch_suffix"]:
                 notes.append("name doesn't end in _P, so it probably can't "
                              "replace the game's own files")
                 warn = True
             shared = {}
-            for k in keys["by_mod"].get(name, []):
+            scripts = kind in ("ue4ss", "workshop")
+            for k in (keys["by_mod"].get(name, []) if scripts else []):
                 if on and k["live"]:
                     for other in k["with"]:
                         shared.setdefault(other, []).append(k["key"])
@@ -906,6 +924,8 @@ class App:
                 state, colour, health = "off", FAINT, "off"
             elif m["loaded"]:
                 state, colour, health = "working", GOOD, "working"
+            elif palregistry.mod_id("ue4ss", m["name"]) in waiting:
+                state, colour, health = "starts next launch", DIM, "working"
             else:
                 state, colour, health = "didn't start", WARN, "problem"
             notes = list(m["failures"]) if m["enabled"] else []
@@ -923,13 +943,13 @@ class App:
             meta = reg.get(m["name"], {})
             if (age := palregistry.age_note(meta)) and "predate" in age:
                 notes.append(age)
-            extra_notes, warn, problem = safety_notes(m["name"], m["enabled"])
+            extra_notes, warn, problem = safety_notes(m["name"], m["enabled"], "ue4ss")
             notes += extra_notes
             if problem:
                 health = "problem"
             state, colour = after_patch(m["name"], state, colour)
             out.append(dict(
-                warn=warn,
+                warn=warn, id=palregistry.mod_id("ue4ss", m["name"]),
                 group="UE4SS mods", name=m["name"], kind=m["kind"].lower(),
                 where=m.get("location", "?"), extra=m["version"] or "",
                 on=m["enabled"], state=state, colour=colour, health=health,
@@ -945,9 +965,12 @@ class App:
             elif p["disabled"]:
                 state, colour, health = "off", FAINT, "off"
             elif p["folder"] == "LogicMods":
-                state, colour, health = (("working", GOOD, "working")
-                                         if p["loaded"]
-                                         else ("didn't start", WARN, "problem"))
+                if p["loaded"]:
+                    state, colour, health = "working", GOOD, "working"
+                elif palregistry.mod_id("pak", p["name"]) in waiting:
+                    state, colour, health = "starts next launch", DIM, "working"
+                else:
+                    state, colour, health = "didn't start", WARN, "problem"
             else:
                 # Content paks never write to the log, so "on" is all anyone
                 # can truthfully say without looking in game.
@@ -960,13 +983,13 @@ class App:
             if p["misplaced"]:
                 notes.insert(0, f"its contents say it belongs in {p['expected_folder']}, "
                                 f"not {p['folder']}")
-            extra_notes, warn, problem = safety_notes(p["name"], not p["disabled"])
+            extra_notes, warn, problem = safety_notes(p["name"], not p["disabled"], "pak")
             notes += extra_notes
             if problem:
                 health = "problem"
             state, colour = after_patch(p["name"], state, colour)
             out.append(dict(
-                warn=warn,
+                warn=warn, id=palregistry.mod_id("pak", p["name"]),
                 group="Pak mods", name=p["name"], kind="pak",
                 where=p["folder"], extra=f"v{p['pak_version']}",
                 on=not p["disabled"], state=state, colour=colour,
@@ -989,7 +1012,8 @@ class App:
                 state, colour, health = "on", DIM, "working"
             meta = reg.get(sm["name"], {})
             out.append(dict(
-                warn=False, group="PalSchema mods", name=sm["name"],
+                warn=False, id=palregistry.mod_id("palschema", sm["name"]),
+                group="PalSchema mods", name=sm["name"],
                 kind="palschema", where="PalSchema",
                 extra=", ".join(sm["sections"]), on=sm["enabled"], state=state,
                 colour=colour, health=health,
@@ -999,10 +1023,84 @@ class App:
                 source=palregistry.describe_source(sm["name"], meta),
                 url=palregistry.url_for(sm["name"], meta),
                 mine=meta.get("source") == "local"))
+        server = data["install"]["kind"] == "server"
+        for w in data.get("workshop_mods", []):
+            mid = palregistry.mod_id("workshop", w["name"])
+            live = w["enabled"] and w["applies"] and not w["error"]
+            notes, warn = [], False
+            if w["error"]:
+                state, colour, health = "can't read", BAD, "problem"
+                notes.append(f"Workshop item {w['item']}: {w['error']}")
+            elif not w["listed"]:
+                state, colour, health = "off", FAINT, "off"
+            elif not w["enabled"]:
+                # Every mod is off in the game's own menu; a banner says so.
+                state, colour, health = "mods off in game", WARN, "off"
+            elif not w["applies"]:
+                state = ("nothing to install" if not w["for_other"]
+                         else "for the game only" if server else "for servers only")
+                colour, health = DIM, "off"
+            elif w["failures"]:
+                state, colour, health = "error", BAD, "problem"
+            elif w["needs"]:
+                state, colour, health = "can't start", BAD, "problem"
+            elif w["loaded"]:
+                state, colour, health = "working", GOOD, "working"
+            elif mid in waiting:
+                state, colour, health = "starts next launch", DIM, "working"
+            elif w["deps_missing"] or w["deps_off"]:
+                state, colour, health = "needs another mod", BAD, "problem"
+            elif w["loggable"]:
+                state, colour, health = "didn't start", WARN, "problem"
+            else:
+                # Paks and PalSchema mods don't announce themselves.
+                state, colour, health = "on", DIM, "working"
+            if live:
+                notes += w["failures"]
+                if w["needs"]:
+                    notes.append(w["needs"])
+                missing = w["deps_missing"]
+                if missing:
+                    notes.append(f"needs {and_list(missing)}, which "
+                                 f"{'isn' if len(missing) == 1 else 'aren'}'t "
+                                 f"subscribed")
+                if w["deps_off"]:
+                    notes.append(f"needs {and_list(w['deps_off'])} switched on")
+            if w["duplicate"] and w["listed"]:
+                others = w["duplicate"]
+                notes.append(f"{and_list(others)} {'has' if len(others) == 1 else 'have'} "
+                             f"the same package name, and the game loads only "
+                             f"one of them")
+                warn = True
+            if not w["enabled"] and w["loaded"] and not w["error"]:
+                notes.append("was loaded last session; off from the next launch")
+            if not w["switchable"] and not w["error"]:
+                notes.append(f"switched in {palworkshop.menu(server)}")
+            # Its paks clash like any other's; its scripts bind keys.
+            for pak in w["paks"]:
+                more, wn, pr = safety_notes(pak, live, "pak")
+                notes += more
+                warn, health = warn or wn, "problem" if pr else health
+            more, wn, pr = safety_notes(w["name"], live, "workshop")
+            notes += more
+            warn, health = warn or wn, "problem" if pr else health
+            state, colour = after_patch(w["name"], state, colour)
+            out.append(dict(
+                warn=warn, id=mid, group="Workshop mods", name=w["name"],
+                label=w["title"], kind="workshop", where="Steam Workshop",
+                extra=w["version"], on=w["listed"], state=state, colour=colour,
+                health=health, note="; ".join(notes), path=w["path"],
+                pak_path=None, configs=[], source="Steam Workshop", url=w["url"],
+                mine=False, workshop=w,
+                # The game's menu is the only safe way to switch these.
+                locked=bool(w["error"]) or not w["switchable"]))
+
         for e in out:
             meta = reg.get(e["name"], {})
             e["cover"] = palmedia.cover_path(e["name"], meta)
-            e["search"] = " ".join((e["name"], e["source"],
+            if not e["cover"] and (e.get("workshop") or {}).get("thumbnail"):
+                e["cover"] = Path(e["workshop"]["thumbnail"])
+            e["search"] = " ".join((e["name"], e.get("label") or "", e["source"],
                                     (meta.get("description") or "")[:4000])).lower()
         return out
 
@@ -1023,7 +1121,7 @@ class App:
         toggles that had been staged but not yet applied.
         """
         self._search_job = None
-        staged = {n: r["toggle"].value for n, r in self.rows.items()
+        staged = {mid: r["toggle"].value for mid, r in self.rows.items()
                   if r["toggle"].value != r["was"]}
 
         for w in self.bodyf.winfo_children():
@@ -1040,7 +1138,7 @@ class App:
 
         self._any_cover = any(e.get("cover") for e in self._entries_cache)
         self._order = []
-        for group in ("UE4SS mods", "Pak mods", "PalSchema mods"):
+        for group in ("UE4SS mods", "Pak mods", "PalSchema mods", "Workshop mods"):
             g = [e for e in self._entries_cache if e["group"] == group]
             if not g:
                 continue
@@ -1048,7 +1146,7 @@ class App:
             self._order.append(("header", group, self.headers[group]["frame"]))
             for e in g:
                 self._row(e)
-                self._order.append(("row", e["name"], self.rows[e["name"]]["frame"]))
+                self._order.append(("row", e["id"], self.rows[e["id"]]["frame"]))
 
         self.empty = tk.Frame(self.bodyf, bg=SURFACE)
         self.empty_title = tk.Label(self.empty, text="Nothing here.", bg=SURFACE,
@@ -1059,9 +1157,9 @@ class App:
         self.empty_hint.pack(pady=(4, 0))
 
         # Toggles the user had flipped but not applied survive a rebuild.
-        for name, value in staged.items():
-            if name in self.rows:
-                self._set_row(name, value)
+        for mid, value in staged.items():
+            if mid in self.rows:
+                self._set_row(mid, value)
         self._apply_filter()
 
     BANNER = {"bad": ("#2a1b19", "#4d2c27", "#f2b0a7", "error"),
@@ -1099,33 +1197,65 @@ class App:
                         "can interfere with mods. Repair tidies it away.")
             self._banner(text, "bad", [("Repair", self.repair)])
 
-        if ue["state"] != "ok" and not (ue["state"] == "conflict" and self._issues):
+        # Repair's banner covers two copies in Win64, not one there and one
+        # from the Steam Workshop: that one always gets its own.
+        if ue["state"] != "ok" and not (ue["state"] == "conflict" and self._issues
+                                        and not ue.get("twice")):
             more = len(ue["problems"]) - 1
             text = ue["problems"][0] + (f"  (+{more} more)" if more > 0 else "")
             kind = "bad" if ue["state"] in ("missing", "broken", "conflict") else "warn"
             actions = [("Details", self._ue4ss_details)]
             # Missing, half-installed, or the flat build that current Palworld
-            # mods don't load under: all fixed by fetching the right one.
-            if ue["state"] in ("missing", "broken") or ue["layout"] == "flat":
+            # mods don't load under: all fixed by fetching the right one --
+            # unless UE4SS here comes, or needs to come, from the Workshop.
+            workshop = ue["layout"] == "workshop" or ue.get("from_workshop")
+            if (ue["state"] in ("missing", "broken") or ue["layout"] == "flat") \
+                    and not workshop:
                 actions.insert(0, ("Install UE4SS", self.get_ue4ss))
+            if ue["layout"] == "workshop" and ue["workshop"] == palworkshop.MODS_OFF:
+                actions.insert(0, ("Switch on", self.workshop_mods_on))
             self._banner(text, kind, actions)
 
         # PalSchema mods are inert without the framework they patch through.
         orphans = [s["name"] for s in data.get("palschema_mods", [])
                    if s["enabled"] and not s["framework"]]
         if orphans:
+            need = "needs" if len(orphans) == 1 else "need"
             self._banner(
-                f"{plural(len(orphans), 'mod')} here need PalSchema, which "
+                f"{plural(len(orphans), 'mod')} here {need} PalSchema, which "
                 f"isn't installed: {', '.join(orphans[:3])}"
                 + (" and more." if len(orphans) > 3 else "."),
                 "bad", [("Install PalSchema", self.get_palschema)])
+
+        # Palworld's own switch for every mod, kept in its Mod Management.
+        # With the Workshop's UE4SS, the banner above says it already.
+        wsd = data.get("workshop") or {}
+        listed = [w["title"] for w in data.get("workshop_mods", [])
+                  if w["listed"] and not w["error"]]
+        if listed and not wsd.get("global_on") and ue["layout"] != "workshop":
+            self._banner(
+                f"Mods are switched off in {palworkshop.menu(wsd.get('server'))}, "
+                f"so these Steam Workshop mods won't load: {', '.join(listed[:3])}"
+                + (" and more." if len(listed) > 3 else "."),
+                "info", [("Switch on", self.workshop_mods_on)])
+        # A dedicated server is told where its Workshop mods are, by hand.
+        if wsd.get("server") and wsd.get("active") and not wsd.get("root"):
+            text = ("This server's mod list names Steam Workshop mods, but "
+                    "Mods\\PalModSettings.ini doesn't say which folder they're "
+                    "in (WorkshopRootDir), so none of them load."
+                    if not wsd.get("root_set") else
+                    f"The Workshop folder this server's Mods\\PalModSettings.ini "
+                    f"names ({wsd['root_set']}) isn't there, so none of its "
+                    f"Steam Workshop mods load.")
+            self._banner(text, "bad", [("Choose folder…", self.workshop_folder)])
 
         patch = data["patch"]
         if patch["updated"]:
             n = len(patch["unverified"])
             text = (f"Palworld updated to {patch['build']} since your mods last ran "
                     f"(on {patch['last_run_build']}). ")
-            text += (f"{plural(n, 'mod')} haven't loaded on this version yet. Play "
+            have = "hasn't" if n == 1 else "haven't"
+            text += (f"{plural(n, 'mod')} {have} loaded on this version yet. Play "
                      f"once to check." if n else "Play once to check your mods still work.")
             self._banner(text, "warn", [("Back up saves", self.open_backups),
                                         ("Play", self.play)])
@@ -1146,6 +1276,56 @@ class App:
                             f"({', '.join(c['key'] for c in clashes[:3])})")
             self._banner(" · ".join(bits) + ".", "warn",
                          [("Review", self.open_conflicts)])
+
+    def _game_closed(self):
+        """Palworld keeps its own mod settings while it runs."""
+        if not palsafety.game_running(self._paths["game"]):
+            return True
+        messagebox.showinfo("EZ Pal Mod Manager",
+                            "Close Palworld first: it keeps its own Workshop mod "
+                            "settings while it runs, and may save them over this "
+                            "change when it exits.")
+        return False
+
+    def workshop_mods_on(self):
+        """Palworld's own switch for every mod, as its Mod Management sets it."""
+        if not self._paths or not self._game_closed():
+            return
+        try:
+            palworkshop.set_global(self._paths["game"], True)
+        except OSError as exc:
+            messagebox.showerror("EZ Pal Mod Manager", str(exc))
+            return
+        self.reload()
+        self.flash("Mods switched on in Palworld's Mod Management. They load "
+                   "the next time you play.")
+
+    def workshop_folder(self):
+        """Tell a dedicated server where its Workshop mods are."""
+        if not self._paths or not self._game_closed():
+            return
+        folder = filedialog.askdirectory(
+            title="Choose the folder holding the Workshop mods "
+                  "(…\\workshop\\content\\1623730)")
+        if not folder:
+            return
+        try:
+            has = any((d / "Info.json").is_file() for d in Path(folder).iterdir()
+                      if d.is_dir())
+        except OSError:
+            has = False
+        if not has and not messagebox.askyesno(
+                "EZ Pal Mod Manager", "There are no Workshop mods in that folder: "
+                "none of its folders has an Info.json. Use it anyway?"):
+            return
+        try:
+            palworkshop.set_root(self._paths["game"], folder)
+        except OSError as exc:
+            messagebox.showerror("EZ Pal Mod Manager", str(exc))
+            return
+        self.reload(full=True)
+        self.flash("Saved where this server's Workshop mods are. They load the "
+                   "next time it starts.")
 
     def _ue4ss_details(self):
         ue = self._data["ue4ss"]
@@ -1229,7 +1409,8 @@ class App:
 
     # Group keys stay as they are internally; these are what people read.
     GROUP_TITLES = {"UE4SS mods": "Script mods (UE4SS)", "Pak mods": "Pak mods",
-                    "PalSchema mods": "PalSchema mods"}
+                    "PalSchema mods": "PalSchema mods",
+                    "Workshop mods": "Steam Workshop mods"}
 
     def _header(self, title, group):
         h = tk.Frame(self.bodyf, bg=SURFACE)
@@ -1248,25 +1429,31 @@ class App:
 
     def _bulk_visible(self, group, value):
         """Stage every visible row of a group on or off."""
-        for name, r in self.rows.items():
+        for mid, r in self.rows.items():
             if r["entry"]["group"] == group and r["frame"].winfo_manager():
-                self._set_row(name, value)
+                self._set_row(mid, value)
         self._recount()
 
-    def _bulk(self, names, value):
-        for n in names:
-            if n in self.rows:
-                self._set_row(n, value)
+    def _bulk(self, ids, value):
+        for mid in ids:
+            if mid in self.rows:
+                self._set_row(mid, value)
         self._recount()
 
-    def _set_row(self, name, value):
-        r = self.rows[name]
+    def _set_row(self, mid, value):
+        """Stage one row on or off. Rows are keyed by mod id ('ue4ss:Name')."""
+        r = self.rows[mid]
+        if r["entry"].get("locked"):
+            return
         r["toggle"].set(value, pending=value != r["was"])
         r["name_lbl"].config(fg=TEXT if value else DIM)
 
     STATE_ICONS = {"working": "check", "didn't start": "alert", "error": "error",
                    "wrong folder": "alert", "worked before update": "clock",
-                   "on": "dot", "needs PalSchema": "alert", "PalSchema off": "alert"}
+                   "on": "dot", "needs PalSchema": "alert", "PalSchema off": "alert",
+                   "starts next launch": "play", "can't start": "alert",
+                   "needs another mod": "alert", "can't read": "error",
+                   "mods off in game": "alert"}
 
     def _row(self, e):
         base = PROBLEM_BG if e["health"] == "problem" else SURFACE
@@ -1276,8 +1463,11 @@ class App:
         inner = tk.Frame(f, bg=base)
         inner.pack(fill="x", padx=22, pady=9)
 
-        tg = Toggle(inner, e["on"], lambda v, n=e["name"]: self._toggled(n, v), base)
+        tg = Toggle(inner, e["on"], lambda v, i=e["id"]: self._toggled(i, v), base)
         tg.pack(side="left", padx=(0, 14))
+        if e.get("locked"):
+            tg.unbind("<Button-1>")
+            tg.config(cursor="arrow")
 
         # Once any mod has a picture, every row gets the slot, so names line up.
         if self._any_cover:
@@ -1312,7 +1502,8 @@ class App:
 
         col = tk.Frame(inner, bg=base)
         col.pack(side="left", fill="x", expand=True)
-        name_lbl = tk.Label(col, text=e["name"], bg=base, fg=TEXT if e["on"] else DIM,
+        name_lbl = tk.Label(col, text=e.get("label") or e["name"], bg=base,
+                            fg=TEXT if e["on"] else DIM,
                             font=self.f_name, anchor="w", cursor="hand2")
         name_lbl.pack(fill="x")
         name_lbl.bind("<Button-1>", lambda _e, ev=e: self.open_info(ev))
@@ -1332,7 +1523,8 @@ class App:
             meta_bits.append(tk.Label(meta_line, text="Your mod", bg=base, fg=DIM,
                                       font=self.f_small))
         version = (self._data["registry"].get(e["name"], {}).get("version")
-                   or (e["extra"] if e["group"] == "UE4SS mods" else None))
+                   or (e["extra"] if e["group"] in ("UE4SS mods", "Workshop mods")
+                       else None))
         if version:
             meta_bits.append(tk.Label(meta_line, text=f"v{version}", bg=base, fg=FAINT,
                                       font=self.f_small))
@@ -1362,8 +1554,8 @@ class App:
             w.bind("<Enter>", lambda _e: self._hover(plain, custom, True, base), add="+")
             w.bind("<Leave>", lambda _e: self._hover(plain, custom, False, base), add="+")
             w.bind("<Button-3>", lambda ev, en=e: self._row_menu(en, ev), add="+")
-        self.rows[e["name"]] = {"toggle": tg, "was": e["on"], "entry": e,
-                                "name_lbl": name_lbl, "frame": f}
+        self.rows[e["id"]] = {"toggle": tg, "was": e["on"], "entry": e,
+                              "name_lbl": name_lbl, "frame": f}
 
     def _thumb(self, path):
         """A 64x36 row thumbnail, built once per picture."""
@@ -1380,8 +1572,9 @@ class App:
 
     def open_info(self, e):
         # One window per mod: bring an open one forward instead of stacking.
+        # Two kinds of mod with one name get one each; what is on disk differs.
         for w in self.root.winfo_children():
-            if isinstance(w, palinfo.ModInfoWindow) and w.mod == e["name"]:
+            if isinstance(w, palinfo.ModInfoWindow) and w.entry["id"] == e["id"]:
                 w.deiconify()
                 w.lift()
                 w.focus_set()
@@ -1419,13 +1612,15 @@ class App:
             m.add_command(label="Open folder",
                           command=lambda: open_in_explorer(target))
         if e["url"]:
-            m.add_command(label="Open mod page",
+            m.add_command(label="Open Workshop page" if e["group"] == "Workshop mods"
+                          else "Open mod page",
                           command=lambda: open_link(e["url"]))
         if e["configs"]:
             m.add_command(label="Configure…",
                           command=lambda: ConfigWindow(self, e["name"], e["configs"]))
         m.add_command(label="Mod info…", command=lambda: self.open_info(e))
-        keys = self._data["keybinds"]["keys"].get(e["name"])
+        keys = (self._data["keybinds"]["keys"].get(e["name"])
+                if e["group"] in ("UE4SS mods", "Workshop mods") else None)
         if keys:
             m.add_command(label="Hotkeys: " + ", ".join(keys[:6])
                           + ("…" if len(keys) > 6 else ""), state="disabled")
@@ -1435,8 +1630,11 @@ class App:
             m.add_separator()
             m.add_command(label="Package for sharing…",
                           command=lambda: self.package_mod(e))
-        m.add_separator()
-        m.add_command(label="Uninstall…", command=lambda: self.uninstall(e))
+        # Steam and the game own a Workshop mod's files: unsubscribing on its
+        # page is how it goes.
+        if e["group"] != "Workshop mods":
+            m.add_separator()
+            m.add_command(label="Uninstall…", command=lambda: self.uninstall(e))
         try:
             if event is not None:
                 m.tk_popup(event.x_root, event.y_root)
@@ -1488,6 +1686,7 @@ class App:
                 ("Script mods (UE4SS)", paths["ue4ss_mods"]),
                 ("Pak mods (~mods)", paths["paks"] / "~mods"),
                 ("Blueprint mods (LogicMods)", paths["paks"] / "LogicMods"),
+                ("Steam Workshop mods", (paths.get("workshop") or {}).get("root")),
                 ("Save games", palsafety.save_dir(paths["game"])),
                 ("Game folder", paths["game"]),
                 ("App data", palpaths.data_dir()),
@@ -1554,13 +1753,14 @@ class App:
         m.grab_release()
 
     # ---------------------------------------------------------------- state
-    def _toggled(self, name, value):
-        if name in self.rows:
-            self._set_row(name, value)
+    def _toggled(self, mid, value):
+        if mid in self.rows:
+            self._set_row(mid, value)
         self._recount()
 
     def _pending(self):
-        return [(n, r["toggle"].value) for n, r in self.rows.items()
+        """[(mod id, on)] for every toggle staged but not applied."""
+        return [(mid, r["toggle"].value) for mid, r in self.rows.items()
                 if r["toggle"].value != r["was"]]
 
     def _recount(self):
@@ -1573,14 +1773,16 @@ class App:
         lbl.config(text=f"Problems  {problems}" if problems else "Problems")
         if pend:
             msg = (f"{plural(len(pend), 'change')} not applied. "
-                   f"They take effect the next time you play.")
+                   f"{'It takes' if len(pend) == 1 else 'They take'} effect the "
+                   f"next time you play.")
             fg = TEXT
             self.apply_btn.pack(side="right")
             self.revert_btn.pack(side="right", padx=8)
         else:
             msg = f"{plural(total, 'mod')}, {on} on"
             if problems:
-                msg += f", {problems} need attention"
+                need = "needs" if problems == 1 else "need"
+                msg += f", {problems} {need} attention"
             fg = DIM
             self.apply_btn.pack_forget()
             self.revert_btn.pack_forget()
@@ -1603,12 +1805,23 @@ class App:
         changes = self._pending()
         if not changes:
             return
-        failed = []
-        for name, on in changes:
+        failed, switched_on = [], []
+        for mid, on in changes:
+            kind, name = palregistry.split_id(mid)
             try:
-                palmods.set_enabled(name, on)
+                palmods.set_enabled(name, on, kind)
             except OSError as exc:
                 failed.append(f"{name}: {exc}")
+            else:
+                if on:
+                    switched_on.append(mid)
+        # Until the game runs, these read as starting next launch, not as
+        # having failed to start in a session that ran before they were on.
+        try:
+            palsafety.switched_on(self._paths["game"], switched_on,
+                                  self._paths["log"])
+        except OSError:
+            pass
         self.reload()
         if failed:
             messagebox.showerror("EZ Pal Mod Manager",
@@ -1616,10 +1829,12 @@ class App:
                                  + "\n".join(failed))
         elif self._running:
             self.flash(f"Applied {plural(len(changes), 'change')}. Palworld is running, "
-                       f"so they take effect the next time it starts.")
+                       f"so {'it takes' if len(changes) == 1 else 'they take'} effect "
+                       f"the next time it starts.")
         else:
             self.flash(f"Applied {plural(len(changes), 'change')}. "
-                       f"They take effect the next time you play.")
+                       f"{'It takes' if len(changes) == 1 else 'They take'} effect "
+                       f"the next time you play.")
 
     def play(self):
         """Start the game with a safety net, then report back when it closes."""
@@ -1730,12 +1945,13 @@ class App:
         if launched:
             palwindows.SessionWindow(self, minutes)
         else:
+            need = "needs" if problems == 1 else "need"
             self.flash("Palworld closed. Mod status refreshed"
-                       + (f", {problems} need attention" if problems else ""))
+                       + (f", {problems} {need} attention" if problems else ""))
 
     def revert(self):
-        for name in self.rows:
-            self._set_row(name, self.rows[name]["was"])
+        for mid, r in self.rows.items():
+            self._set_row(mid, r["was"])
         self._recount()
 
     def install_dialog(self):
@@ -1807,20 +2023,30 @@ class App:
             open_in_explorer(out)
 
     def uninstall(self, e):
-        rec = palregistry.receipt(e["name"])
+        kind, name = palregistry.split_id(e["id"])
+        rec = palregistry.receipt(kind, name)
         detail = (f"{plural(len(rec['files']), 'tracked file')} will be deleted."
                   if rec else
                   "This mod was not installed by the app, so its whole folder "
                   "or .pak will be deleted.")
+        # Pictures, like the page link, belong to every mod of this name and
+        # stay while another is installed: the other half of a hybrid mod, or
+        # the same mod in another install.
+        here = (palpaths.install_key(self._paths["game"]), kind)
+        twins = [x for x in self._entries_cache
+                 if x["name"] == name and x["id"] != e["id"]]
+        shared = bool(twins) or any(r != here for r in palregistry.receipts_for(name))
+        what = f"{name} ({palmods.KIND_LABELS[kind]})" if twins else name
         if not messagebox.askyesno(
                 "Uninstall",
-                f"Remove {e['name']}?\n\n{detail}"
-                + ("\n\nIts pictures go to the Recycle Bin." if e.get("cover") else "")
+                f"Remove {what}?\n\n{detail}"
+                + ("\n\nIts pictures go to the Recycle Bin."
+                   if e.get("cover") and not shared else "")
                 + "\n\nThis cannot be undone."):
             return
         try:
             removed, notes = palinstall.uninstall(
-                e["name"], mod_path=e["path"], pak_path=e["pak_path"])
+                name, mod_path=e["path"], pak_path=e["pak_path"], kind=kind)
         except OSError as exc:
             messagebox.showerror("EZ Pal Mod Manager", str(exc))
             return
@@ -1837,29 +2063,29 @@ class App:
             parent=self.root)
         if not name:
             return
-        on = [e["name"] for e in self._entries_cache if e["on"]]
-        allnames = [e["name"] for e in self._entries_cache]
-        palregistry.save_profile(name, on, allnames)
+        on = [e["id"] for e in self._entries_cache if e["on"]]
+        palregistry.save_profile(name, on, [e["id"] for e in self._entries_cache])
         self.flash(f"Saved profile '{name}' ({len(on)} mods on)")
 
     def load_profile(self, name):
         pr = palregistry.load_profile(name)
         if not pr:
             return
-        want = set(pr["enabled"])
-        known = set(pr["known"])
-        staged, missing = 0, []
+        staged = 0
         for e in self._entries_cache:
-            if e["name"] not in known:
-                continue
-            row = self.rows.get(e["name"])
-            target = e["name"] in want
-            if row and target != row["was"]:
-                self._set_row(e["name"], target)
+            kind, mod = palregistry.split_id(e["id"])
+            target = palregistry.profile_wants(pr, kind, mod)
+            row = self.rows.get(e["id"])
+            if row and target is not None and target != row["was"]:
+                self._set_row(e["id"], target)
                 staged += 1
-        missing = sorted(known - {e["name"] for e in self._entries_cache})
+        # Older profiles list plain names, newer ones mod ids.
+        present = ({e["id"] for e in self._entries_cache}
+                   | {e["name"] for e in self._entries_cache})
+        missing = sorted(set(pr["known"]) - present)
         self._recount()
-        msg = f"Profile '{name}': {plural(staged, 'change')} ready. Press Apply changes to use them."
+        msg = (f"Profile '{name}': {plural(staged, 'change')} ready. Press Apply "
+               f"changes to use {'it' if staged == 1 else 'them'}.")
         if missing:
             msg += f" ({plural(len(missing), 'mod')} from it no longer installed.)"
         self.status.config(text=msg, fg=PEND)
@@ -1931,14 +2157,202 @@ def _dark_titlebar(window):
         pass
 
 
+# ============================================================== errors
+ERROR_LOG = "error.log"
+
+
+def scrub(text):
+    """`text` with the home folder written as %USERPROFILE%.
+
+    Tracebacks are full of paths, and the home folder is usually named after
+    its owner. A repr()'d path doubles its backslashes, so those count too.
+    """
+    home = os.path.expanduser("~")
+    parts = [p for p in re.split(r"[\\/]+", home) if p]
+    # A Windows home starts at its drive letter, the first part. One that
+    # starts at the root (/home/me) has a leading slash that belongs to it.
+    rooted = home[:1] in ("\\", "/")
+    if not os.path.isabs(home) or len(parts) < (1 if rooted else 2):
+        return text
+    sep = r"(?:\\\\|[\\/])"
+    return re.sub((sep if rooted else "") + sep.join(map(re.escape, parts))
+                  + r"(?![\w.-])", "%USERPROFILE%", text, flags=re.I)
+
+
+def log_error(details):
+    """Append a report to error.log. Returns the log's path, or None if even
+    that failed: reporting an error must never raise one of its own."""
+    try:
+        win = getattr(sys, "getwindowsversion", lambda: None)()
+        system = f"Windows {win.major}.{win.minor}.{win.build}" if win else sys.platform
+        build = "exe" if getattr(sys, "frozen", False) else "source"
+        log = palpaths.data_dir() / ERROR_LOG
+        with open(log, "a", encoding="utf8") as f:
+            f.write(f"=== {time.strftime('%Y-%m-%d %H:%M:%S')}   {system}   "
+                    f"Python {sys.version.split()[0]} ({build})\n"
+                    f"{details.rstrip()}\n\n")
+        return log
+    except Exception:                      # noqa: BLE001 - see docstring
+        return None
+
+
+def _message_box(details, log):
+    """Windows' own dialog, for when Tk itself is what failed. Ctrl+C in it
+    copies everything it says."""
+    head = "Something went wrong." + (" Details were saved to error.log."
+                                      if log else "")
+    tail = "\n".join(details.strip().splitlines()[-12:])
+    try:
+        import ctypes
+        MB_ICONERROR, MB_SETFOREGROUND, MB_TOPMOST = 0x10, 0x10000, 0x40000
+        ctypes.windll.user32.MessageBoxW(
+            None, f"{head}\n\nPress Ctrl+C to copy this message.\n\n{tail}",
+            "EZ Pal Mod Manager", MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST)
+    except (ImportError, AttributeError, OSError):
+        pass
+
+
+class ErrorDialog(tk.Toplevel):
+    """'Something went wrong', with the details one click from a bug report."""
+
+    def __init__(self, master, details, log):
+        super().__init__(master)
+        self.details = details
+        self.title("EZ Pal Mod Manager")
+        self.configure(bg=BG)
+        self.resizable(False, False)
+        self.attributes("-topmost", True)
+
+        body = tk.Frame(self, bg=BG)
+        body.pack(fill="x", padx=22, pady=(18, 14))
+        tk.Label(body, text="Something went wrong", bg=BG, fg=TEXT,
+                 font=(TITLE_FONT, 14), anchor="w").pack(fill="x")
+        tk.Label(body, text="Details were saved to error.log." if log else
+                 "The details couldn't be saved, so copy them before you close "
+                 "this.", bg=BG, fg=DIM, font=(BODY_FONT, 10), anchor="w",
+                 justify="left", wraplength=400).pack(fill="x", pady=(4, 0))
+
+        foot = tk.Frame(self, bg=BG)
+        foot.pack(fill="x", padx=22, pady=(0, 18))
+        self.copy_btn = button(foot, "Copy details", self.copy, "primary",
+                               (STRONG_FONT, 10), (16, 6))
+        self.copy_btn.pack(side="right")
+        if log:
+            button(foot, "Show error.log", lambda: open_in_explorer(log),
+                   "quiet", (BODY_FONT, 9), (12, 6)).pack(side="right", padx=8)
+        button(foot, "Close", self.destroy, "ghost",
+               (BODY_FONT, 9)).pack(side="right")
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.after(10, lambda: dark_titlebar(self))
+        # A window holding the grab (Setup does) would swallow every click
+        # meant for this one; borrow the grab and give it back after.
+        self._prior_grab = self.grab_current()
+        self.grab_set()
+        self.lift()
+        self.focus_force()
+
+    def copy(self):
+        self.clipboard_clear()
+        self.clipboard_append(self.details)
+        self.copy_btn.config(text="Copied")
+
+    def destroy(self):
+        prior = getattr(self, "_prior_grab", None)
+        super().destroy()
+        try:
+            if prior is not None and prior.winfo_exists():
+                prior.grab_set()
+        except tk.TclError:
+            pass
+
+
+class ErrorReporter:
+    """Every unexpected error ends up in error.log and in front of the user.
+
+    The release is a windowed build, so sys.stderr is None: Tk's default
+    report_callback_exception, like the default thread and top-level hooks,
+    prints its traceback to nowhere, and a broken button just does nothing.
+    """
+
+    def __init__(self):
+        self.root = None
+        self.seen = set()              # each distinct error is reported once
+        self.showing = False
+        self.later = queue.Queue()     # from other threads, for the Tk thread
+        sys.excepthook = self.fatal
+        threading.excepthook = lambda a: self.report(
+            a.exc_type, a.exc_value, a.exc_traceback, thread=a.thread)
+
+    def attach(self, root):
+        self.root = root
+        root.report_callback_exception = self.report
+        self._drain()
+
+    def report(self, kind, exc, tb, thread=None):
+        if issubclass(kind, (SystemExit, KeyboardInterrupt)):
+            return
+        if sys.stderr:                 # run from a console: say it there too
+            traceback.print_exception(kind, exc, tb)
+        # One report per bug, not per occurrence: a failing repaint or timer
+        # would otherwise bury the user in dialogs.
+        where = (kind, tuple((f.filename, f.lineno)
+                             for f in traceback.extract_tb(tb)))
+        if where in self.seen:
+            return
+        self.seen.add(where)
+        details = scrub("".join(traceback.format_exception(kind, exc, tb)))
+        if thread is not None:
+            details = f"In the {thread.name} thread:\n{details}"
+        log = log_error(details)
+        if thread is not None:
+            self.later.put((details, log))      # Tk belongs to the main thread
+        else:
+            self.show(details, log)
+
+    def fatal(self, kind, exc, tb):
+        """sys.excepthook: the app can't carry on, so this is its last word."""
+        self.report(kind, exc, tb)
+        if self.root is not None:
+            # Tk hands copied text over to Windows when its windows close;
+            # left to the process exit, the clipboard would come up empty.
+            try:
+                self.root.destroy()
+            except tk.TclError:
+                pass
+
+    def show(self, details, log):
+        if self.showing:
+            return                     # already in error.log; one at a time
+        self.showing = True
+        try:
+            ErrorDialog(self.root, details, log).wait_window()
+        except (tk.TclError, RuntimeError):
+            _message_box(details, log)
+        finally:
+            self.showing = False
+
+    def _drain(self):
+        try:
+            while True:
+                self.show(*self.later.get_nowait())
+        except queue.Empty:
+            pass
+        try:
+            self.root.after(400, self._drain)
+        except tk.TclError:
+            pass                       # the app is closing
+
+
 def main():
     _dpi_aware()
+    errors = ErrorReporter()           # from here on nothing fails silently
 
     # Launched with files (several zips dragged onto the exe, or Open With):
     # go straight to the installer for each.
     pending = [a for a in sys.argv[1:] if Path(a).exists()] or None
 
     root = tk.Tk()
+    errors.attach(root)
     try:
         # Tk sizes fonts in points against its own idea of DPI; match the
         # screen so text scales with the window rather than staying tiny.
@@ -1958,4 +2372,11 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception:
+        # A windowed PyInstaller build reports an exception that escapes the
+        # script with a dialog of its own; give it to our hook first, so it
+        # is logged and scrubbed the same way as every other error.
+        sys.excepthook(*sys.exc_info())
+        sys.exit(1)

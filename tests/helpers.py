@@ -5,8 +5,12 @@ Every test runs against a throwaway Palworld install in the temp folder. Call
 folder and %LOCALAPPDATA%, turns off install auto-detection (so a test can
 never find and modify your real game), blocks network access, and swaps the
 Recycle Bin for a plain delete so test runs don't fill it.
+
+Each checkout of the repo keeps its sandboxes in a folder of its own, so
+several worktrees can run the tests at the same time.
 """
 
+import hashlib
 import os
 import shutil
 import socket
@@ -18,16 +22,46 @@ import traceback
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+STALE_DAYS = 7
 
 
 # --------------------------------------------------------------------------
 # isolation
 # --------------------------------------------------------------------------
+def sandbox_home(checkout=ROOT):
+    """Where one checkout's sandboxes live: pmm-tests/<hash of its path>.
+
+    With one folder shared by every checkout, a run in one worktree wiped
+    pmm-tests/windows while a run in another was still using it.
+    """
+    key = os.path.normcase(str(Path(checkout).resolve())).encode()
+    return Path(tempfile.gettempdir()) / "pmm-tests" / hashlib.sha256(key).hexdigest()[:10]
+
+
+def prune_sandboxes():
+    """Delete this checkout's sandboxes that no test has rebuilt in a week.
+
+    Never looks outside this checkout's own folder: another checkout's
+    sandboxes can belong to a run going on right now.
+    """
+    cutoff = time.time() - STALE_DAYS * 86400
+    try:
+        old = [d for d in sandbox_home().iterdir()
+               if d.is_dir() and d.stat().st_mtime < cutoff]
+    except OSError:
+        return
+    for d in old:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def sandbox(tag):
-    sb = Path(tempfile.gettempdir()) / "pmm-tests" / tag
+    home = sandbox_home()
+    sb = home / tag
     if sb.exists():
         shutil.rmtree(sb)
     sb.mkdir(parents=True)
+    (home / "checkout.txt").write_text(str(ROOT), "utf8")   # whose folder this is
+    prune_sandboxes()
     os.environ["PMM_DATA_DIR"] = str(sb / "data")
     os.environ["LOCALAPPDATA"] = str(sb / "localappdata")
     os.environ.pop("PALWORLD_PATH", None)
@@ -182,14 +216,28 @@ def lua_mod(mods_dir, name, main="print('x')", enabled=True, extra=None):
     return d
 
 
-def write_log(win64, started, when_offset=0):
-    log = Path(win64) / "ue4ss/UE4SS.log"
-    lines = ["[2026-09-12 10:00:00.0] UE4SS - v3.0.1 Beta #0 - Git SHA #abc"]
-    lines += [f"[2026-09-12 10:00:01.0] Starting Lua mod '{n}'" for n in started]
-    log.write_text("\n".join(lines) + "\n")
+def ue4ss_log(log, started, when_offset=0, extra=()):
+    """A UE4SS.log for one run that started the named mods, plus any `extra`
+    lines.
+
+    Each run is stamped with the time it happened, as UE4SS stamps its lines,
+    so two runs are told apart the way the app tells real ones apart.
+    """
+    from datetime import datetime
     t = time.time() + when_offset
+    stamp = datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S.%f")
+    lines = [f"[{stamp}] UE4SS - v3.0.1 Beta #0 - Git SHA #abc"]
+    lines += [f"[{stamp}] Starting Lua mod '{n}'" for n in started]
+    lines += [f"[{stamp}] {x}" for x in extra]
+    log = Path(log)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("\n".join(lines) + "\n")
     os.utime(log, (t, t))
     return log
+
+
+def write_log(win64, started, when_offset=0):
+    return ue4ss_log(Path(win64) / "ue4ss/UE4SS.log", started, when_offset)
 
 
 def picture(path, size=(800, 450), mode="RGB", fmt=None, colour=(40, 120, 200, 255)):

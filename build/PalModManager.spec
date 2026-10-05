@@ -39,7 +39,8 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # UPX-packed PyInstaller exes trip antivirus heuristics far more often.
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,

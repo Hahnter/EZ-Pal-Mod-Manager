@@ -1,5 +1,8 @@
 """Installing from archives, scanning, toggling, profiles, scaffolding, uninstall."""
+import json
+import shutil
 import zipfile
+from pathlib import Path
 
 from helpers import Checker, fake_pak, make_game, sandbox, scan, use_game
 
@@ -18,6 +21,13 @@ def zip_dir(src, out, prefix=""):
             if p.is_file():
                 z.write(p, prefix + p.relative_to(src).as_posix())
     return out
+
+
+def add_pak(stem, asset):
+    """Install a bare pak holding one asset, which decides its folder."""
+    plan = palinstall.inspect(fake_pak(SB / f"{stem}.pak", "../../../", [asset]))
+    palinstall.apply(plan)
+    palinstall.discard(plan)
 
 
 check.section("hybrid archive with the full game path")
@@ -45,6 +55,9 @@ check("lua mod installed and enabled",
       (win64 / "ue4ss/Mods/CoolMod/Scripts/main.lua").is_file()
       and (win64 / "ue4ss/Mods/CoolMod/enabled.txt").is_file())
 check("blueprint pak routed to LogicMods", (paks / "LogicMods/CoolModBP_P.pak").is_file())
+waiting = scan(game)[1]["patch"]["waiting"]
+check("both start next launch: installed on, not yet run",
+      {"ue4ss:CoolMod", "pak:CoolModBP_P"} <= set(waiting), waiting)
 meta = palregistry.get("CoolMod")
 check("Nexus id/version read from the file name",
       meta.get("source") == "Nexus" and meta.get("id") == 4821 and meta.get("version") == "1.2.0",
@@ -120,5 +133,154 @@ palinstall.discard(plan)
 palmods.set_enabled("CoolMod", False)
 palinstall.uninstall("CoolMod")
 check("disabled mod fully uninstalled", not (win64 / "ue4ss/Mods/CoolMod").exists())
+
+check.section("paks share ~mods and LogicMods")
+mods, logic = paks / "~mods", paks / "LogicMods"
+# TextureSwap is in ~mods already, so this is one pak of two.
+add_pak("PakA_P", "Pal/Content/Pal/Texture/T_A.uasset")
+roots = palregistry.receipt("pak", "PakA_P")["roots"]
+check("a pak's receipt names no folder of its own", roots == [], roots)
+removed, notes = palinstall.uninstall("PakA_P")
+check("removing one pak of two takes just its file, with no note",
+      [p.name for p in removed] == ["PakA_P.pak"] and notes == [], (removed, notes))
+notes = palinstall.uninstall("TextureSwap")[1]
+check("removing the last pak keeps ~mods",
+      mods.is_dir() and not any(mods.iterdir()) and notes == [], notes)
+
+# Receipts saved by earlier versions name the folder a pak sits in as its
+# root, and are still on people's machines. CoolModBP_P is in LogicMods.
+add_pak("PakB_P", "Pal/Content/Mods/PakB/ModActor.uasset")
+add_pak("PakC_P", "Pal/Content/Pal/Texture/T_C.uasset")
+for name, folder in (("CoolModBP_P", logic), ("PakB_P", logic), ("PakC_P", mods)):
+    rec = palregistry.receipt("pak", name)
+    palregistry.save_receipt("pak", name, rec["files"], roots=[folder],
+                             shipped=rec["shipped"])
+notes = palinstall.uninstall("PakB_P")[1]
+check("old receipt: removing one pak of two gives no note", notes == [], notes)
+notes = palinstall.uninstall("CoolModBP_P")[1] + palinstall.uninstall("PakC_P")[1]
+check("old receipt: removing the last pak keeps LogicMods and ~mods",
+      logic.is_dir() and not any(logic.iterdir())
+      and mods.is_dir() and not any(mods.iterdir()) and notes == [], notes)
+
+check.section("uninstall a switched-off PalSchema mod")
+# Switching one off moves its whole folder to disabled-mods, while its receipt
+# still names mods\. One uninstall has to find it there and take all of it.
+schema = win64 / "ue4ss/Mods/PalSchema"
+rates = SB / "Rates.zip"
+with zipfile.ZipFile(rates, "w") as z:
+    z.writestr("Pal/Binaries/Win64/ue4ss/Mods/PalSchema/mods/Rates/raw/rates.json", "{}")
+plan = palinstall.inspect(rates)
+palinstall.apply(plan)
+palinstall.discard(plan)
+palmods.set_enabled("Rates", False)
+check("switching off moves it to disabled-mods",
+      (schema / "disabled-mods/Rates/raw/rates.json").is_file()
+      and not (schema / "mods/Rates").exists())
+removed, notes = palinstall.uninstall("Rates")
+check("one uninstall removes its file", len(removed) == 1 and notes == [],
+      (removed, notes))
+check("its folder is gone from both places",
+      not (schema / "disabled-mods/Rates").exists()
+      and not (schema / "mods/Rates").exists())
+check("and it is no longer listed",
+      "Rates" not in [m["name"] for m in scan(game)[1]["palschema_mods"]])
+
+check.section("update a switched-off PalSchema mod")
+# Switching one off moves its folder to disabled-mods. An update installed a
+# second copy in mods\ beside it, and then the mod could be switched neither
+# on nor off. The copy that is there is the one to update.
+schema = win64 / "ue4ss/Mods/PalSchema"
+rates_on = schema / "mods/DropRates"
+rates_off = schema / "disabled-mods/DropRates"
+
+
+def drop_rates(version):
+    """A PalSchema mod with a patch and a settings file, inspected. Version
+    1.0 also has a file that later versions dropped."""
+    out = SB / f"DropRates-{version}.zip"
+    base = "Pal/Binaries/Win64/ue4ss/Mods/PalSchema/mods/DropRates/"
+    with zipfile.ZipFile(out, "w") as z:
+        z.writestr(base + "raw/rates.json", json.dumps({"Rate": version}))
+        z.writestr(base + "config.json", json.dumps({"Speed": version}))
+        if version == "1.0":
+            z.writestr(base + "raw/old.json", "{}")
+    return palinstall.inspect(out)
+
+
+def read(path):
+    return path.read_text() if path.is_file() else None
+
+
+def install(plan, **kw):
+    out = palinstall.apply(plan, **kw)
+    palinstall.discard(plan)
+    return out
+
+
+install(drop_rates("1.0"))
+palmods.set_enabled("DropRates", False)
+(rates_off / "raw/rates.json").write_text('{"Rate": "mine"}')     # the user edits
+(rates_off / "config.json").write_text('{"Speed": "mine"}')
+plan = drop_rates("1.1")
+clashes = palinstall.conflicts(plan)
+check("the install window counts the files it replaces",
+      len(clashes.get("palschema:DropRates", [])) == 2, clashes)
+out = install(plan)
+check("one copy, switched back on", rates_on.is_dir() and not rates_off.exists())
+check("the new version is in place",
+      read(rates_on / "raw/rates.json") == '{"Rate": "1.1"}')
+check("your settings are kept, with the new ones beside them",
+      read(rates_on / "config.json") == '{"Speed": "mine"}'
+      and read(rates_on / "config.json.new") == '{"Speed": "1.1"}')
+check("your edit to the patch is kept as a backup",
+      read(rates_on / "raw/rates.json.pmm-bak") == '{"Rate": "mine"}')
+check("the install says so",
+      "backups kept" in out[0] and any("Kept your settings" in r for r in out), out)
+check("it switches off and on again",
+      "-> disabled" in palmods.set_enabled("DropRates", False)
+      and "-> enabled" in palmods.set_enabled("DropRates", True))
+
+# Left switched off, an update stays out of mods\.
+palmods.set_enabled("DropRates", False)
+out = install(drop_rates("1.2"), enable=False)
+check("updated and still switched off, one copy",
+      rates_off.is_dir() and not rates_on.exists()
+      and read(rates_off / "raw/rates.json") == '{"Rate": "1.2"}')
+check("the install says where it went", str(rates_off) in out[0], out)
+rec = palregistry.receipt("palschema", "DropRates")
+check("the receipt names mods\\, as for a mod switched off later",
+      rec["roots"] == [str(rates_on)]
+      and all(Path(f).is_relative_to(rates_on) for f in rec["files"]), rec)
+check("it switches on again", "-> enabled" in palmods.set_enabled("DropRates", True))
+removed, notes = palinstall.uninstall("DropRates")
+check("uninstall removes all of it, the file 1.0 had included",
+      notes == [] and not rates_on.exists() and not rates_off.exists(),
+      (removed, notes))
+
+check.section("two copies of a PalSchema mod, left by an earlier version")
+# What an update used to leave: the copy just installed in mods\, and the old
+# one, perhaps with your edits, still in disabled-mods.
+install(drop_rates("1.0"))
+shutil.copytree(rates_on, rates_off)
+(rates_off / "config.json").write_text('{"Speed": "mine"}')
+out = install(drop_rates("1.1"))
+check("the copy still as installed makes way for yours",
+      rates_on.is_dir() and not rates_off.exists()
+      and read(rates_on / "config.json") == '{"Speed": "mine"}', out)
+check("which is updated as usual",
+      read(rates_on / "raw/rates.json") == '{"Rate": "1.1"}')
+
+# Changed since in both: only the user can say which to keep.
+shutil.copytree(rates_on, rates_off)
+(rates_on / "config.json").write_text('{"Speed": "also mine"}')
+out = install(drop_rates("1.2"))
+check("with changes in both, neither copy is touched",
+      read(rates_on / "config.json") == '{"Speed": "also mine"}'
+      and read(rates_off / "config.json") == '{"Speed": "mine"}'
+      and read(rates_on / "raw/rates.json") == '{"Rate": "1.1"}')
+check("and the install says why",
+      len(out) == 1 and out[0].startswith("Skipped DropRates:"), out)
+shutil.rmtree(rates_off)
+palinstall.uninstall("DropRates")
 
 check.finish()

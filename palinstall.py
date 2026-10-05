@@ -23,10 +23,11 @@ import zipfile
 from pathlib import Path
 
 import palmedia
-from paltext import plural
+from paltext import and_list, plural
 import palmods
 import palpaths
 import palregistry
+import palsafety
 
 ARCHIVE_SUFFIXES = {".zip", ".7z", ".rar"}
 
@@ -35,6 +36,17 @@ UE4SS_MOD = "UE4SS mod"
 PALSCHEMA = "PalSchema"
 LOGIC_PAK = "blueprint pak"
 CONTENT_PAK = "content pak"
+
+
+def mod_kind(component):
+    """The kind of mod a component becomes once installed (palregistry.KINDS)."""
+    return {UE4SS_MOD: "ue4ss", PALSCHEMA: "palschema"}.get(component["kind"], "pak")
+
+
+def component_id(component):
+    """'ue4ss:Hybrid': the component as the rest of the app addresses it."""
+    return palregistry.mod_id(mod_kind(component), component["name"])
+
 
 # Junk that some archives carry and nothing should install.
 SKIP_NAMES = {"__macosx", ".ds_store", "thumbs.db", "desktop.ini"}
@@ -89,6 +101,22 @@ def inside(path, folder):
     try:
         return Path(path).resolve().is_relative_to(Path(folder).resolve())
     except (OSError, ValueError):
+        return False
+
+
+def in_install(path, game):
+    """Whether `path`, as recorded, is inside the game folder `game`.
+
+    Guards everything that acts on a receipt: a receipt naming another
+    install's files must never reach them. Links are not followed, unlike
+    inside(), because a mod folder that is a junction to another drive still
+    belongs to the install it was put in.
+    """
+    try:
+        p = os.path.normcase(os.path.abspath(path))
+        g = os.path.normcase(os.path.abspath(game))
+        return p != g and os.path.commonpath([p, g]) == g
+    except (OSError, TypeError, ValueError):
         return False
 
 
@@ -250,8 +278,9 @@ def inspect(source, game_paths=None):
     """Unpack to a temp folder and work out what would be installed where.
 
     Returns a plan:
-        {tmp, source, components[], files[], warnings[], skipped[]}
-    where each component is one installable thing with its own destination.
+        {tmp, source, game, components[], files[], warnings[], skipped[]}
+    where each component is one installable thing with its own destination,
+    and `game` is the install those destinations are in.
     The caller is responsible for calling discard(plan) or apply(plan).
     """
     src = Path(source)
@@ -267,13 +296,17 @@ def inspect(source, game_paths=None):
         shutil.rmtree(tmp, ignore_errors=True)
         raise
 
-    game = palmods.game_root()
+    game = paths["game"]
     dest_ue4ss = paths["ue4ss_mods"]
     dest_logic = game / "Pal" / "Content" / "Paks" / "LogicMods"
     dest_mods = game / "Pal" / "Content" / "Paks" / "~mods"
-    dest_schema = dest_ue4ss / "PalSchema" / "mods"
+    _, dest_schema, schema_off = palmods.palschema_dirs(paths)
 
     components, claimed, warnings = [], set(), []
+    # In the UE4SS Palworld installs from the Steam Workshop, the game keeps
+    # copies of Workshop mods. Those are never written over from here.
+    in_workshop = palmods.in_workshop_ue4ss(paths, dest_ue4ss)
+    theirs = []
 
     # --- UE4SS mods ----------------------------------------------------
     for mod_root, kind in _ue4ss_roots(tmp).items():
@@ -281,6 +314,9 @@ def inspect(source, game_paths=None):
         name = mod_root.name if mod_root != tmp else src.stem
         files = [p for p in _iter_files(mod_root)]
         claimed.update(files)
+        if in_workshop and palmods.workshop_owns(paths, "ue4ss", name):
+            theirs.append(name)
+            continue
         components.append({
             "kind": UE4SS_MOD, "name": name, "lang": kind,
             "dest": dest_ue4ss / name, "root": mod_root,
@@ -295,9 +331,15 @@ def inspect(source, game_paths=None):
         if not files:
             continue
         claimed.update(files)
+        if palmods.in_workshop_ue4ss(paths, dest_schema) \
+                and palmods.workshop_owns(paths, "palschema", name):
+            theirs.append(name)
+            continue
         components.append({
             "kind": PALSCHEMA, "name": name, "lang": "json",
             "dest": dest_schema / name, "root": schema_root,
+            # Where its folder is moved to while it is switched off.
+            "dest_off": schema_off / name,
             "files": [(p, dest_schema / name / p.relative_to(schema_root))
                       for p in files],
             "note": "PalSchema patch - needs the PalSchema mod installed",
@@ -334,6 +376,9 @@ def inspect(source, game_paths=None):
                 files.append((mate, target_dir / mate.name))
                 claimed.add(mate)
         claimed.add(p)
+        if folder == "LogicMods" and palmods.workshop_owns(paths, "logic", stem):
+            theirs.append(stem)
+            continue
         components.append({
             "kind": LOGIC_PAK if folder == "LogicMods" else CONTENT_PAK,
             "name": stem, "lang": f"pak v{info.get('version')}",
@@ -341,6 +386,23 @@ def inspect(source, game_paths=None):
             "note": desc if not info.get("error") else info["error"],
         })
 
+    if theirs:
+        one = len(theirs) == 1
+        warnings.append(
+            f"{and_list(theirs)} {'comes' if one else 'come'} from the "
+            f"Steam Workshop here, and Palworld keeps {'its' if one else 'their'} "
+            f"files itself, so {'it was' if one else 'they were'} left out. "
+            f"Updates come from the Workshop.")
+    into_workshop = [c["name"] for c in components
+                     if c["kind"] in (UE4SS_MOD, PALSCHEMA) and in_workshop]
+    if into_workshop:
+        one = len(into_workshop) == 1
+        warnings.append(
+            f"UE4SS here is the one Palworld installs from the Steam Workshop, "
+            f"so {', '.join(into_workshop)} {'goes' if one else 'go'} into its "
+            f"folder and {'loads' if one else 'load'} from there. Palworld "
+            f"manages that folder: if a Workshop update to UE4SS ever removes "
+            f"{'it' if one else 'them'}, install {'it' if one else 'them'} again.")
     needs_ue4ss = [c["name"] for c in components
                    if c["kind"] in (UE4SS_MOD, LOGIC_PAK, PALSCHEMA)]
     if needs_ue4ss and not palmods.ue4ss_status(paths)["installed"]:
@@ -358,19 +420,27 @@ def inspect(source, game_paths=None):
             "should contain a .pak.")
 
     return {
-        "tmp": tmp, "source": src, "components": components,
+        "tmp": tmp, "source": src, "game": game, "components": components,
         "warnings": warnings, "skipped": skipped,
         "total_files": sum(len(c["files"]) for c in components),
+        # Where whether they start will show, for "starts next launch".
+        "log": paths["log"],
     }
 
 
 def conflicts(plan):
-    """Existing files a plan would overwrite, per component."""
+    """Existing files a plan would overwrite, by component_id()."""
     out = {}
     for c in plan["components"]:
         hits = [dst for _, dst in c["files"] if dst.exists()]
+        if c["kind"] == PALSCHEMA and not c["dest"].exists():
+            # Switched off, it is in disabled-mods, and those are the files
+            # an update replaces.
+            off = [c["dest_off"] / dst.relative_to(c["dest"])
+                   for _, dst in c["files"]]
+            hits = [p for p in off if p.exists()]
         if hits:
-            out[c["name"]] = hits
+            out[component_id(c)] = hits
     return out
 
 
@@ -440,6 +510,17 @@ def _keep_users_copy(dst, src, shipped):
     return now != _digest(src)
 
 
+def _as_shipped(folder, dest, shipped):
+    """Whether every file in `folder` is exactly what the mod shipped to the
+    same place in `dest`, which leaves nothing in it that is the user's own."""
+    for f in Path(folder).rglob("*"):
+        if f.is_file():
+            was = shipped.get(str(dest / f.relative_to(folder)))
+            if not was or was != _digest(f):
+                return False
+    return True
+
+
 def apply(plan, components=None, enable=True, backup=True, link=None):
     """Install the chosen components. Returns a list of human-readable results.
 
@@ -450,12 +531,38 @@ def apply(plan, components=None, enable=True, backup=True, link=None):
     """
     chosen = components if components is not None else plan["components"]
     page = link_fields(link)
-    results = []
+    # Receipts belong to the install the plan was made for, even if the app
+    # has switched to another one since.
+    game = plan.get("game") or palmods.game_root()
+    results, installed = [], []
     for c in chosen:
+        kind = mod_kind(c)
         written, replaced, kept = [], 0, []
-        shipped_before = palregistry.shipped_hashes(c["name"])
+        shipped_before = palregistry.shipped_hashes(kind, c["name"], game)
         before = [Path(f) for f in
-                  (palregistry.receipt(c["name"]) or {}).get("files", [])]
+                  (palregistry.receipt(kind, c["name"], game) or {}).get("files", [])]
+        if c["kind"] == PALSCHEMA and c["dest_off"].is_dir():
+            # A switched-off PalSchema mod is in disabled-mods. Installing
+            # beside it left two copies that could be switched neither on nor
+            # off. It moves back to be updated like any other mod, which keeps
+            # your settings in it, and `enable` then decides where it ends up.
+            on, off = c["dest"], c["dest_off"]
+            if on.exists():
+                # Two copies already, left by an earlier version. A copy that
+                # is still exactly as the mod shipped holds nothing of yours.
+                if _as_shipped(on, on, shipped_before):
+                    shutil.rmtree(on)
+                elif _as_shipped(off, on, shipped_before):
+                    shutil.rmtree(off)
+                else:
+                    results.append(
+                        f"Skipped {c['name']}: it is in both PalSchema\\mods and "
+                        f"PalSchema\\{palmods.PALSCHEMA_OFF}. Delete the copy "
+                        f"you don't want, then install it again.")
+                    continue
+            if off.is_dir():
+                on.parent.mkdir(parents=True, exist_ok=True)
+                off.rename(on)
         shipped = {}
         for src, dst in c["files"]:
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -497,11 +604,23 @@ def apply(plan, components=None, enable=True, backup=True, link=None):
         # An update usually ships fewer files than the last version wrote --
         # and never rewrites enabled.txt. Carry the old receipt's survivors
         # forward, or uninstall leaves them behind and the folder stays.
+        # Only this install's: a path in another install is never adopted.
         for old in before:
-            if old.exists() and old not in written:
+            if old.exists() and old not in written and in_install(old, game):
                 written.append(old)
-        palregistry.save_receipt(c["name"], written, roots=[c["dest"]],
-                                 shipped=shipped)
+        # Switched off, a PalSchema mod's folder goes to disabled-mods. That
+        # comes last, once the survivors are found where the receipt says.
+        # The receipt names mods\ either way, as after switching it off later.
+        where = c["dest"]
+        if c["kind"] == PALSCHEMA and not enable:
+            where = c["dest_off"]
+            where.parent.mkdir(parents=True, exist_ok=True)
+            c["dest"].rename(where)
+        # A pak has no folder of its own. Its dest is ~mods or LogicMods,
+        # which hold every pak, so there is no folder for uninstall to take.
+        roots = [] if c["kind"] in (LOGIC_PAK, CONTENT_PAK) else [c["dest"]]
+        palregistry.save_receipt(kind, c["name"], written, roots=roots,
+                                 shipped=shipped, game=game)
         palregistry.record_install(
             c["name"], archive=plan["source"],
             extra={"kind": c["kind"], "installed_from": str(plan["source"])})
@@ -516,24 +635,33 @@ def apply(plan, components=None, enable=True, backup=True, link=None):
                 except OSError:
                     pass
         results.append(
-            f"{c['name']}: {plural(len(written), 'file')} -> {c['dest']}"
+            f"{c['name']}: {plural(len(written), 'file')} -> {where}"
             + (f"  ({replaced} replaced, backups kept)" if replaced else ""))
         if kept:
             results.append(
                 f"Kept your settings in {', '.join(kept)}. The new version of "
                 f"{'each' if len(kept) > 1 else 'it'} is beside it as .new")
+        installed.append(c)
 
     # README and pictures that shipped loose in the download are not mod
     # files, but they are exactly the description and screenshots people want.
-    if chosen and plan.get("skipped"):
-        got = palmedia.capture_from_archive([c["name"] for c in chosen],
+    if installed and plan.get("skipped"):
+        got = palmedia.capture_from_archive([c["name"] for c in installed],
                                             plan["tmp"], plan["skipped"])
         if got["description"] or got["images"]:
             bits = ((["description"] if got["description"] else [])
                     + ([plural(got['images'], 'picture')] if got["images"] else []))
             results.append("Kept from the download: " + " and ".join(bits))
-    if page and chosen:
+    if page and installed:
         results.append("Linked to " + describe_link(page))
+    # Installed switched on, they haven't had a chance to start yet: until
+    # the game runs, the list says they start next launch.
+    if enable and installed:
+        try:
+            palsafety.switched_on(game, [component_id(c) for c in installed],
+                                  plan.get("log"))
+        except OSError:
+            pass
     return results
 
 
@@ -553,55 +681,116 @@ def discard(plan):
 # --------------------------------------------------------------------------
 # removal
 # --------------------------------------------------------------------------
-def uninstall(name, mod_path=None, pak_path=None):
+def _shared_pak_folder(path):
+    """Whether `path` is a ~mods or LogicMods folder, which every pak shares."""
+    low = [s.lower() for s in Path(path).parts]
+    return low[-4:] in (["pal", "content", "paks", "~mods"],
+                        ["pal", "content", "paks", "logicmods"])
+
+
+def _places(path, name):
+    """A receipt's path for `name` as recorded, then where it is while off.
+
+    Switching off a PalSchema mod moves its whole folder from
+    PalSchema\\mods\\<name> to PalSchema\\disabled-mods\\<name>, and the
+    receipt still names the old place. Both are tried: a mod switched off and
+    then installed again has a copy in each. Any other path has one place.
+    """
+    p = Path(path)
+    low = [s.lower() for s in p.parts]
+    for i in range(len(low) - 2):
+        if low[i:i + 3] == ["palschema", "mods", name.lower()]:
+            return [p, Path(*p.parts[:i + 1], palmods.PALSCHEMA_OFF,
+                            *p.parts[i + 2:])]
+    return [p]
+
+
+def uninstall(name, mod_path=None, pak_path=None, kind=None):
     """Delete a mod. A receipt makes this exact; without one we fall back.
+
+    `kind` ("ue4ss", "pak" or "palschema") says which mod is meant when two
+    kinds share the name. A Steam Workshop mod ("workshop") is refused. Without it the receipts decide, and a name with
+    receipts for two kinds is refused. Whatever a receipt says, nothing
+    outside the game folder in use is touched.
 
     The fallback only ever removes the mod's own folder or its own .pak, never
     a shared folder -- guessing wrongly here deletes someone else's mod.
     """
+    game = palmods.game_root()
+    if kind == "workshop":
+        # Steam and the game own those files. Unsubscribing removes them.
+        raise InstallError(f"'{name}' is a Steam Workshop mod. Unsubscribe from "
+                           f"it on its Workshop page, and Steam and Palworld "
+                           f"remove it.")
+    if kind is None:
+        kinds = palregistry.receipt_kinds(name, game)
+        if len(kinds) > 1:
+            raise InstallError(f"'{name}' is {palmods.describe_kinds(kinds)} "
+                               f"here. Say which one to remove.")
+        kind = kinds[0] if kinds else None
     removed, notes = [], []
-    rec = palregistry.receipt(name)
+    rec = palregistry.receipt(kind, name, game) if kind else None
 
     if rec:
+        elsewhere = 0
         for f in rec.get("files", []):
             p = Path(f)
+            if not in_install(p, game):
+                elsewhere += 1
+                continue
             # A receipted file may have been renamed since: disabling a mod
             # moves enabled.txt aside, and saving a config leaves a backup.
             # Missing those left the folder non-empty and so undeletable.
-            for cand in (p, p.with_suffix(p.suffix + ".disabled"),
-                         p.with_suffix(p.suffix + ".pmm-bak"),
-                         p.with_suffix(p.suffix + ".bak")):
-                try:
-                    if cand.is_file():
-                        cand.unlink()
-                        removed.append(cand)
-                except OSError as exc:
-                    notes.append(f"could not delete {cand.name}: {exc}")
+            # Switching off a PalSchema mod moves the file, folder and all.
+            for q in _places(p, name):
+                for cand in (q, q.with_suffix(q.suffix + ".disabled"),
+                             q.with_suffix(q.suffix + ".pmm-bak"),
+                             q.with_suffix(q.suffix + ".bak")):
+                    try:
+                        if cand.is_file():
+                            cand.unlink()
+                            removed.append(cand)
+                    except OSError as exc:
+                        notes.append(f"could not delete {cand.name}: {exc}")
         # Take the folders too, but only if no files of anyone else's remain.
         # Empty directories left behind by the deletion do not count -- a mod
         # with Scripts/ would otherwise never be fully removed.
         for r in rec.get("roots", []):
-            root = Path(r)
-            if root.is_dir() and not any(f.is_file() for f in root.rglob("*")):
-                shutil.rmtree(root, ignore_errors=True)
-            elif root.is_dir():
-                notes.append(f"kept {root.name}: files remain that we did not install")
-        palregistry.drop_receipt(name)
+            if not in_install(r, game):
+                continue
+            # Receipts saved by earlier versions name the folder a pak sits
+            # in as its own. That folder holds every pak, so leave it alone.
+            if _shared_pak_folder(r):
+                continue
+            # A switched-off PalSchema mod's folder is in disabled-mods.
+            for root in _places(r, name):
+                if root.is_dir() and not any(f.is_file() for f in root.rglob("*")):
+                    shutil.rmtree(root, ignore_errors=True)
+                elif root.is_dir():
+                    notes.append(f"kept {root.name}: files remain that we did not install")
+        if elsewhere:
+            notes.append(f"skipped {plural(elsewhere, 'file')} recorded outside "
+                         f"this install")
+        palregistry.drop_receipt(kind, name, game)
     else:
         notes.append("no install record - removing what is on disk")
-        if mod_path and Path(mod_path).is_dir():
+        if mod_path and Path(mod_path).is_dir() and in_install(mod_path, game):
             folder = Path(mod_path)
             removed += [p for p in folder.rglob("*") if p.is_file()]
             shutil.rmtree(folder, ignore_errors=True)
-        if pak_path and Path(pak_path).exists():
+        if pak_path and Path(pak_path).exists() and in_install(pak_path, game):
             p = Path(pak_path)
             for side in (p, p.with_suffix(".ucas"), p.with_suffix(".utoc")):
                 if side.is_file():
                     side.unlink()
                     removed.append(side)
 
-    palmedia.forget(name)
-    palregistry.forget(name)
+    # The page link, description and pictures are shared by every mod of this
+    # name: the other half of a hybrid mod, or the same mod in another
+    # install. They go with the last of them.
+    if not palregistry.receipts_for(name) and not palmods.kinds_of(name):
+        palmedia.forget(name)
+        palregistry.forget(name)
     return removed, notes
 
 
@@ -661,7 +850,8 @@ def scaffold(name, game_paths=None):
 
     written = [dest / "Scripts" / "main.lua", dest / "README.md",
                dest / "enabled.txt"]
-    palregistry.save_receipt(clean, written, roots=[dest])
+    palregistry.save_receipt("ue4ss", clean, written, roots=[dest],
+                             game=paths["game"])
     palregistry.set_entry(clean, source="local", name=clean, version="0.1.0",
                           released=None, kind=UE4SS_MOD,
                           url=str(dest), note="Created with EZ Pal Mod Manager.")

@@ -169,7 +169,7 @@ def shot(widget, name):
 pump(2.5)
 shot(root, "main")
 
-info = palinfo.ModInfoWindow(app, app.rows["BetterStorage"]["entry"])
+info = palinfo.ModInfoWindow(app, app.rows["ue4ss:BetterStorage"]["entry"])
 info.geometry("840x860+0+0")
 shot(info, "mod-info")
 info.destroy()

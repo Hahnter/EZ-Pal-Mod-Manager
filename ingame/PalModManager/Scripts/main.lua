@@ -16,7 +16,7 @@
 ]]
 
 local MOD_NAME = "EZ Pal Mod Manager"
-local VERSION  = "1.0.0"
+local VERSION  = "1.1.0"
 
 local LIST_FILE = "ue4ss/Mods/PalModManager/modlist.txt"
 local PREFIX = "[PalModManager] "

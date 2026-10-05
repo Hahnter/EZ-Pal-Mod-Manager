@@ -30,7 +30,8 @@ pump(0.6)
 
 
 def visible():
-    return sorted(n for n, r in app.rows.items() if r["frame"].winfo_manager())
+    return sorted(r["entry"]["name"] for r in app.rows.values()
+                  if r["frame"].winfo_manager())
 
 
 check.section("list")
@@ -49,8 +50,8 @@ check("header line is plain", "UE4SS ready" in meta and "build" not in meta
       and "layout" not in meta, meta)
 
 
-def row_texts(name):
-    out, stack = [], [app.rows[name]["frame"]]
+def row_texts(mid):
+    out, stack = [], [app.rows[mid]["frame"]]
     while stack:
         w = stack.pop()
         stack.extend(w.winfo_children())
@@ -62,7 +63,7 @@ def row_texts(name):
 
 
 import tkinter as tk                        # noqa: E402
-texts = row_texts("PalMiniMap")
+texts = row_texts("ue4ss:PalMiniMap")
 check("rows don't show type, folder or version tags",
       not any(t in ("lua", "ue4ss/Mods", "~mods", "pak") for t in texts), texts)
 check("no 'source unknown' tag", "source unknown" not in " ".join(texts))
@@ -105,8 +106,8 @@ app._filter.set(""); app._apply_filter(); pump(0.1)
 check("search cleared", len(visible()) == 6)
 
 check.section("staged changes")
-app.rows["OffMod"]["toggle"]._click(None); pump(0.1)
-check("toggle is staged, not written", app._pending() == [("OffMod", True)]
+app.rows["ue4ss:OffMod"]["toggle"]._click(None); pump(0.1)
+check("toggle is staged, not written", app._pending() == [("ue4ss:OffMod", True)]
       and not (mods / "OffMod/enabled.txt").exists())
 check("status says it isn't applied, without '(s)'",
       app.status.cget("text").startswith("1 change not applied")
@@ -115,29 +116,32 @@ check("Apply and Undo only appear once there's something to apply",
       bool(app.apply_btn.winfo_manager()) and bool(app.revert_btn.winfo_manager()))
 app._set_tab("Off"); app._set_tab("All"); app._filter.set("x"); app._filter.set("")
 app._apply_filter(); pump(0.1)
-check("staged change survives filtering", app._pending() == [("OffMod", True)])
+check("staged change survives filtering", app._pending() == [("ue4ss:OffMod", True)])
 app.render(); pump(0.1)
-check("staged change survives a rebuild", app._pending() == [("OffMod", True)])
+check("staged change survives a rebuild", app._pending() == [("ue4ss:OffMod", True)])
 app.revert()
 check("revert clears it", app._pending() == [])
 
 app._bulk_visible("UE4SS mods", False)
 check("'all off' stages every visible UE4SS mod",
-      sorted(n for n, _ in app._pending()) == ["BaseDoorControl", "BrokenMod", "PalMiniMap"])
+      sorted(n for n, _ in app._pending())
+      == ["ue4ss:BaseDoorControl", "ue4ss:BrokenMod", "ue4ss:PalMiniMap"])
 app.revert()
 
-app.rows["OffMod"]["toggle"]._click(None)
+app.rows["ue4ss:OffMod"]["toggle"]._click(None)
 app.apply(); pump(0.3)
 check("apply writes the change", (mods / "OffMod/enabled.txt").is_file())
 check("nothing pending after apply", app._pending() == [])
 
 check.section("profiles")
+# Saved the way profiles were before mods were told apart by kind: names.
 palregistry.save_profile("solo", ["PalMiniMap"], [e["name"] for e in app._entries_cache])
 app.load_profile("solo"); pump(0.1)
 pending = dict(app._pending())
 check("loading a profile stages its differences",
-      pending.get("BaseDoorControl") is False and pending.get("OffMod") is False
-      and "PalMiniMap" not in pending, pending)
+      pending.get("ue4ss:BaseDoorControl") is False
+      and pending.get("ue4ss:OffMod") is False
+      and "ue4ss:PalMiniMap" not in pending, pending)
 app.revert()
 
 check.section("windows open")

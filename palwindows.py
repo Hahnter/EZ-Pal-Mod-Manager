@@ -17,6 +17,7 @@ import palpaths
 import palregistry
 import palsafety
 import paltools
+import palworkshop
 from paltext import plural
 from palui import (open_link, BG, SURFACE, RAISED, LINE, TEXT, DIM, FAINT, ACCENT, GOOD,
                    WARN, BAD, PEND, Pill, button, checkbox, human_size,
@@ -197,7 +198,10 @@ class ConflictsWindow(Window):
     def _build(self):
         app, data = self.app, self.app._data
         conflicts, keys = data["conflicts"], data["keybinds"]
-        configs = {e["name"]: e["configs"] for e in app._entries_cache}
+        # Hotkeys are read from UE4SS mods, so only those rows answer for a
+        # name; a pak or PalSchema mod can share it.
+        scripts = [e for e in app._entries_cache if e["group"] == "UE4SS mods"]
+        configs = {e["name"]: e["configs"] for e in scripts}
 
         pairs = sorted(conflicts["pairs"], key=lambda c: not c["live"])
         self.section("Mods replacing the same game files", len(pairs))
@@ -262,7 +266,7 @@ class ConflictsWindow(Window):
                       pady=(8, 4))
 
         self.section("Hotkeys by mod")
-        on = {e["name"] for e in app._entries_cache if e["on"]}
+        on = {e["name"] for e in scripts if e["on"]}
         for name, ks in sorted(keys["keys"].items()):
             row = tk.Frame(self.body, bg=SURFACE)
             row.pack(fill="x", padx=22, pady=1)
@@ -522,6 +526,9 @@ class GetWindow(Window):
         self.go.config(state="disabled")
         self.page_btn = button(self.foot, "Release page", self._open_page,
                                "quiet", app.f_small, (12, 6))
+        if ((app._data or {}).get("ue4ss") or {}).get("layout") == "workshop":
+            self._show_workshop()
+            return
         self._show_looking()
         threading.Thread(target=self._look, daemon=True).start()
         self.after(80, self._pump)
@@ -576,6 +583,24 @@ class GetWindow(Window):
             self.after(80, self._pump)
 
     # -- the three states -----------------------------------------------
+    def _show_workshop(self):
+        """UE4SS here is Palworld's own, from the Steam Workshop."""
+        self.clear()
+        self.section("This comes from the Steam Workshop here")
+        if self.kind == "ue4ss":
+            self.note("Palworld installs this UE4SS itself, from the Steam "
+                      "Workshop, and keeps it up to date. Installing another by "
+                      "hand would load UE4SS twice, which can load mods twice "
+                      "or crash the game.", TEXT, pady=(2, 6))
+        else:
+            server = ((self.app._data or {}).get("workshop") or {}).get("server")
+            self.note("With UE4SS from the Steam Workshop, PalSchema comes from "
+                      "there too: subscribe to PalSchema on the Workshop, then "
+                      f"switch it on in {palworkshop.menu(server)}. Palworld "
+                      "keeps it up to date.", TEXT, pady=(2, 6))
+        self.status.config(text="", fg=DIM)
+        self.go.config(text="Close", state="normal", command=self.destroy)
+
     def _show_looking(self):
         self.clear()
         self.note("Asking GitHub what the current release is…", DIM,
@@ -615,13 +640,19 @@ class GetWindow(Window):
 
         if self.kind == "ue4ss":
             ue = self.app._data["ue4ss"]
+            if ue.get("from_workshop") or ue.get("workshop") not in (None, "none"):
+                self.note("Your Steam Workshop script mods won't run in this "
+                          "UE4SS: they need the one from the Workshop, and "
+                          "running both can crash the game.", WARN,
+                          pady=(10, 2), icon_name="alert")
             if ue["installed"]:
                 self.note("Your current UE4SS is kept as a folder named "
-                          "ue4ss.pmm-old-<date>, so you can go back to it. "
-                          "Your mods and their settings are not touched.",
+                          "ue4ss.pmm-old-<date>, so you can go back to it.",
                           DIM, pady=(10, 2), icon_name="undo")
-            self.note("Mod settings live in ue4ss\\Mods, which this replaces "
-                      "nothing inside of.", FAINT, pady=(0, 2))
+            self.note("Your mods carry over with their settings and stay on "
+                      "or off as they are now. UE4SS's own mods, such as "
+                      "BPModLoaderMod, are updated, but your load order is "
+                      "kept.", DIM, pady=(0 if ue["installed"] else 10, 2))
         else:
             self.note("PalSchema installs like any other mod, into "
                       "ue4ss\\Mods\\PalSchema, and can be switched off from "
@@ -723,11 +754,14 @@ class CleanupWindow(Window):
                 rel = it["path"]
             tk.Label(top, text=Path(it["path"]).name, bg=RAISED, fg=TEXT,
                      font=self.app.f_name).pack(side="left")
-            Pill(top, it["kind"], DIM, SURFACE, RAISED, self.app.f_pill).pack(side="left", padx=8)
+            # An old UE4SS holding mods that aren't installed may be the only
+            # copy of them.
+            Pill(top, it["kind"], WARN if it.get("missing") else DIM, SURFACE,
+                 RAISED, self.app.f_pill).pack(side="left", padx=8)
             tk.Label(top, text=human_size(it["size"]), bg=RAISED, fg=FAINT,
                      font=self.app.f_small).pack(side="right")
             tk.Label(col, text=it["why"], bg=RAISED, fg=DIM, font=self.app.f_small,
-                     anchor="w").pack(fill="x")
+                     anchor="w", wraplength=620, justify="left").pack(fill="x")
             tk.Label(col, text=rel, bg=RAISED, fg=FAINT, font=self.app.f_small,
                      anchor="w", wraplength=620, justify="left").pack(fill="x")
         self._count()
@@ -811,7 +845,7 @@ class CompareWindow(Window):
             card = self.card()
             row = tk.Frame(card, bg=RAISED)
             row.pack(fill="x", padx=12, pady=8)
-            tk.Label(row, text=m["name"], bg=RAISED, fg=TEXT,
+            tk.Label(row, text=m.get("title") or m["name"], bg=RAISED, fg=TEXT,
                      font=app.f_name).pack(side="left")
             Pill(row, m.get("kind", "mod"), DIM, SURFACE, RAISED,
                  app.f_pill).pack(side="left", padx=8)
@@ -834,18 +868,18 @@ class CompareWindow(Window):
 
     def _stage(self):
         app, r = self.app, self.result
+        # A shared modlist names mods, like the registry does, so every mod
+        # of a name follows it: both halves of a hybrid mod together.
         staged = 0
-        for name in r["turn_on"]:
-            if name in app.rows:
-                app._set_row(name, True)
-                staged += 1
-        for name in r["turn_off"]:
-            if name in app.rows:
-                app._set_row(name, False)
-                staged += 1
+        for names, value in ((r["turn_on"], True), (r["turn_off"], False)):
+            for mid, row in app.rows.items():
+                if row["entry"]["name"] in names:
+                    app._set_row(mid, value)
+                    staged += row["was"] != value
         app._recount()
         app.status.config(text=f"{plural(staged, 'change')} ready to match their setup. "
-                               f"Press Apply changes to use them.", fg=TEXT)
+                               f"Press Apply changes to use "
+                               f"{'it' if staged == 1 else 'them'}.", fg=TEXT)
         self.destroy()
 
 
@@ -870,17 +904,31 @@ class SessionWindow(Window):
 
     def __init__(self, app, minutes=None):
         data = app._data
-        user = [m for m in data["ue4ss_mods"] if not m["builtin"] and m["enabled"]]
+        # Switched on during that session, they start with the next one.
+        waiting = set(data["patch"].get("waiting", ()))
+        user = [m for m in data["ue4ss_mods"] if not m["builtin"] and m["enabled"]
+                and palregistry.mod_id("ue4ss", m["name"]) not in waiting]
         logic = [p for p in data["pak_mods"]
-                 if not p["disabled"] and p["folder"] == "LogicMods"]
+                 if not p["disabled"] and p["folder"] == "LogicMods"
+                 and palregistry.mod_id("pak", p["name"]) not in waiting]
+        workshop = [w for w in data.get("workshop_mods", []) if w["loggable"]
+                    and palregistry.mod_id("workshop", w["name"]) not in waiting]
         loaded = [m["name"] for m in user if m["loaded"] and not m["failures"]] + \
-                 [p["name"] for p in logic if p["loaded"]]
-        failed = [(m["name"], "; ".join(m["failures"])) for m in user if m["failures"]]
+                 [p["name"] for p in logic if p["loaded"]] + \
+                 [w["title"] for w in workshop if w["loaded"] and not w["failures"]]
+        failed = [(m["name"], "; ".join(m["failures"])) for m in user if m["failures"]] + \
+                 [(w["title"], "; ".join(w["failures"])) for w in workshop if w["failures"]]
         missing = [m["name"] for m in user if not m["loaded"] and not m["failures"]] + \
-                  [p["name"] for p in logic if not p["loaded"]]
+                  [p["name"] for p in logic if not p["loaded"]] + \
+                  [w["title"] for w in workshop if not w["loaded"] and not w["failures"]]
         content = [p["name"] for p in data["pak_mods"]
-                   if not p["disabled"] and p["folder"] != "LogicMods"]
+                   if not p["disabled"] and p["folder"] != "LogicMods"] + \
+                  [w["title"] for w in data.get("workshop_mods", [])
+                   if w["enabled"] and w["applies"] and w["types"] == ["Paks"]]
         regressed = data["patch"]["regressed"]
+        # Regressions are noted by package name; the list shows titles.
+        regressed = dict(regressed, **{w["title"]: regressed[w["name"]]
+                                       for w in workshop if w["name"] in regressed})
 
         head = "Everything you had on loaded." if not (failed or missing) else \
             f"{plural(len(failed) + len(missing), 'mod')} didn't load."

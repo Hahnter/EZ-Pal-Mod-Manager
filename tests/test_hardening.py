@@ -4,17 +4,20 @@ Everything here is something a hostile or broken file could otherwise do:
 a mod archive that writes outside its folder or fills the disk, a link that
 launches a program instead of a web page, a download that isn't what GitHub
 published, a picture that carries GPS or AI-provenance tags into a shared
-package, or source text carrying invisible watermark characters.
+package, source text carrying invisible watermark characters, or a save cut
+off part-way that leaves half a file behind.
 """
 import hashlib
 import io
+import json
+import os
 import subprocess
 import zipfile
 
-from helpers import ROOT, Checker, make_game, sandbox, use_game
+from helpers import ROOT, Checker, lua_mod, make_game, sandbox, use_game
 
 SB = sandbox("hardening")
-import palget, palinstall, palmedia, palregistry      # noqa: E402
+import palget, palinstall, palmedia, palmods, palpaths, palregistry, palsafety  # noqa: E402
 
 check = Checker()
 game = use_game(make_game(SB))
@@ -69,22 +72,29 @@ check("a sibling folder with a longer name is not 'inside'",
       not palinstall.inside(SB / "Win64evil" / "x.dll", SB / "Win64"))
 check("a real child is inside",
       palinstall.inside(SB / "Win64" / "ue4ss" / "x.dll", SB / "Win64"))
+# Names aimed at the root of the drive or at C:\Windows are only ever checked
+# as paths, never unpacked: with the guard broken, unpacking would write there.
+# A drive letter only makes a path absolute on Windows; elsewhere C: is just
+# a folder name, and the path really is inside.
+aimed_out = ["/abs/escaped.txt"] + (["C:/Windows/escaped.txt"] if os.name == "nt" else [])
+for name in aimed_out:
+    check(f"{name} is not 'inside' the unpack folder",
+          not palinstall.inside(SB / "unpack" / name, SB / "unpack"))
 
+# Unpacked three folders deep in the sandbox, a member that climbs out still
+# lands inside it, where the check below can find it. So even a broken guard
+# writes nothing outside the temp folder. Never climb more than three levels.
 evil = SB / "evil.zip"
 with zipfile.ZipFile(evil, "w") as z:
     z.writestr("GoodMod/Scripts/main.lua", "print(1)")
     z.writestr("../../escaped.txt", "gotcha")
-    z.writestr("/abs/escaped.txt", "gotcha")
-    z.writestr("C:/Windows/escaped.txt", "gotcha")
-plan = palinstall.inspect(evil)
-names = [c["name"] for c in plan["components"]]
-tmp_files = [p for p in plan["tmp"].rglob("*") if p.is_file()]
-check("the real mod was still found", names == ["GoodMod"], names)
-check("nothing landed outside the unpack folder",
-      all(palinstall.inside(p, plan["tmp"]) for p in tmp_files))
-check("no escaped file anywhere near the sandbox",
-      not list(SB.parent.rglob("escaped.txt")))
-palinstall.discard(plan)
+into = SB / "unpack" / "a" / "b"
+palinstall.unpack(evil, into)
+unpacked = sorted(p.relative_to(into).as_posix() for p in into.rglob("*") if p.is_file())
+check("the real mod was still unpacked",
+      unpacked == ["GoodMod/Scripts/main.lua"], unpacked)
+escaped = list(SB.rglob("escaped.txt"))
+check("nothing climbed out of the unpack folder", not escaped, escaped)
 
 # ==========================================================================
 check.section("zip bombs are refused before they fill the disk")
@@ -206,5 +216,104 @@ try:
 except palmedia.MediaError as exc:
     check("a picture far bigger than any real one is refused",
           "bigger than any real" in str(exc), str(exc))
+
+# ==========================================================================
+check.section("a torn store file is recovered, never written over")
+# A save cut off part-way (a crash, a power cut, an antivirus lock) used to
+# leave half a file that loaded as empty, and the next ordinary save wrote
+# that emptiness over every entry.
+data = palpaths.data_dir()
+for label, fname, add, names in (
+        ("registry", "registry.json",
+         lambda n: palregistry.set_entry(n, source="Nexus", id=1000),
+         lambda: set(palregistry.load_registry())),
+        ("receipts", "receipts.json",
+         lambda n: palregistry.save_receipt("ue4ss", n, [SB / f"{n}.lua"]),
+         lambda: {n for n in [f"Mod{i}" for i in range(40)] + ["NewMod"]
+                  if palregistry.receipt("ue4ss", n)}),
+        ("profiles", "profiles.json",
+         lambda n: palregistry.save_profile(n, ["A"], ["A", "B"]),
+         lambda: set(palregistry.profile_names()))):
+    for i in range(40):
+        add(f"Mod{i}")
+    store = data / fname
+    raw = store.read_bytes()
+    store.write_bytes(raw[: len(raw) // 2])           # cut off mid-save
+    add("NewMod")                                     # the next ordinary save
+    kept = names()
+    # Mod39 only ever existed in the half that was cut off.
+    check(f"{label}: the entries from the save before are all still there",
+          {f"Mod{i}" for i in range(39)} | {"NewMod"} <= kept, len(kept))
+    torn = list(data.glob(fname + ".corrupt-*"))
+    check(f"{label}: the torn file is kept as {fname}.corrupt-<time>",
+          len(torn) == 1 and torn[0].read_bytes() == raw[: len(raw) // 2], torn)
+    check(f"{label}: the store reads cleanly again",
+          isinstance(json.loads(store.read_text("utf8")), dict))
+
+palpaths.save_settings({"installs": ["C:/A", "C:/B"]})
+palpaths.save_settings({"confirm_apply": False})
+store = data / "settings.json"
+store.write_bytes(store.read_bytes()[:20])
+palpaths.save_settings({"watch_folder": False})
+check("settings: a torn file keeps the installs saved before",
+      palpaths.load_settings()["installs"] == ["C:/A", "C:/B"],
+      palpaths.load_settings())
+
+check.section("with no backup to fall back on, the torn file is still kept")
+store = data / "state.json"
+for old in (store, palpaths.backup_of(store)):
+    if old.exists():
+        old.unlink()
+half = b'{"installs": {"c:\\\\games\\\\palworld": {"verified": {"Pal'
+store.write_bytes(half)
+check("the store starts empty", palsafety._load_state() == {})
+torn = list(data.glob("state.json.corrupt-*"))
+check("but what was there is kept", len(torn) == 1 and torn[0].read_bytes() == half)
+palsafety._save_state({"installs": {}})
+check("and later saves leave the kept copy alone",
+      torn[0].read_bytes() == half and palsafety._load_state() == {"installs": {}})
+
+store.write_bytes(b"\0" * 64)                      # power cut: right size, no data
+palpaths.backup_of(store).write_bytes(b'{"inst')    # and a backup torn too
+check("a torn file and a torn backup start empty", palsafety._load_state() == {})
+check("and both are kept",
+      len(list(data.glob("state.json.corrupt-*"))) == 2
+      and len(list(data.glob("state.json.bak.corrupt-*"))) == 1)
+
+check.section("a save that fails part-way changes nothing")
+store = data / "profiles.json"
+before = store.read_bytes()
+real_fsync = os.fsync
+
+
+def disk_full(_fd):
+    raise OSError(28, "No space left on device")
+
+
+os.fsync = disk_full
+try:
+    palregistry.save_profile("Doomed", [], [])
+    check("the failed save is reported", False)
+except OSError as exc:
+    check("the failed save is reported", exc.errno == 28, exc)
+finally:
+    os.fsync = real_fsync
+check("the store is exactly as it was", store.read_bytes() == before)
+check("no temp file is left behind", not list(data.glob("*.tmp")))
+
+check.section("UE4SS's own mod lists are swapped in whole too")
+mods_dir = game / "Pal/Binaries/Win64/ue4ss/Mods"
+lua_mod(mods_dir, "Toggly")
+(mods_dir / "mods.txt").write_bytes(b"Toggly : 1\r\nKeybinds : 1\r\n")
+(mods_dir / "mods.json").write_text(json.dumps(
+    [{"mod_name": "Toggly", "mod_enabled": True}], indent=4))
+palmods.set_enabled("Toggly", False)
+check("mods.txt keeps its CRLF line endings",
+      (mods_dir / "mods.txt").read_bytes() == b"Toggly : 0\r\nKeybinds : 1\r\n")
+check("the version it replaced is kept as mods.txt.bak",
+      (mods_dir / "mods.txt.bak").read_bytes() == b"Toggly : 1\r\nKeybinds : 1\r\n")
+check("mods.json is switched off too",
+      json.loads((mods_dir / "mods.json").read_text())[0]["mod_enabled"] is False)
+check("no temp files are left in the Mods folder", not list(mods_dir.glob("*.tmp")))
 
 check.finish()

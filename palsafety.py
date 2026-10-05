@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -65,23 +66,11 @@ def _state_file():
 
 
 def _load_state():
-    f = _state_file()
-    if f.is_file():
-        try:
-            data = json.loads(f.read_text("utf8"))
-            if isinstance(data, dict):
-                return data
-        except ValueError:
-            pass
-    return {}
+    return palpaths.read_json(_state_file()) or {}
 
 
 def _save_state(state):
-    _state_file().write_text(json.dumps(state, indent=2) + "\n", "utf8")
-
-
-def _install_key(game):
-    return str(Path(game)).lower().rstrip("\\/")
+    palpaths.write_json(_state_file(), state)
 
 
 EARLIER = "earlier"      # a run we saw, on a build that was already replaced
@@ -100,7 +89,7 @@ def observe(paths, data):
     cur = data.get("build") or build_info(game)
     state = _load_state()
     installs = state.setdefault("installs", {})
-    st = installs.setdefault(_install_key(game), {})
+    st = installs.setdefault(palpaths.install_key(game), {})
     verified = st.setdefault("verified", {})
     labels = st.setdefault("labels", {})
     labels[cur["id"]] = cur["label"]
@@ -111,8 +100,10 @@ def observe(paths, data):
     except OSError:
         log_mtime = None
 
+    workshop = data.get("workshop_mods") or []
     loaded = ([m["name"] for m in data["ue4ss_mods"] if m["loaded"]]
-              + [p["name"] for p in data["pak_mods"] if p["loaded"]])
+              + [p["name"] for p in data["pak_mods"] if p["loaded"]]
+              + [w["name"] for w in workshop if w["loaded"] and w["loggable"]])
 
     if log_mtime and log_mtime != st.get("run_seen"):
         on_current = log_mtime >= (cur["patched"] or 0)
@@ -123,15 +114,32 @@ def observe(paths, data):
         st["run_seen"] = log_mtime
         for name in loaded:
             verified[name] = ran_on
+    run = data["log"].get("when")
+    switched = st.setdefault("switched_on", {})
+    # A Workshop mod newly on was switched on in the game's own Mod Management
+    # menu, mod by mod or all at once (or here). It counts from when it was
+    # first seen on, which is never before the run that was going on then.
+    on = sorted(w["name"] for w in workshop if w["enabled"] and not w["error"])
+    if st.get("workshop_on") is not None:
+        for name in set(on) - set(st["workshop_on"]):
+            switched.setdefault(f"workshop:{name}", {"when": time.time(), "run": run})
+    st["workshop_on"] = on
+    # A mod switched on before the last run has had its chance to start.
+    for mod in [m for m, rec in switched.items()
+                if _had_its_chance(rec, run, log_mtime)]:
+        del switched[mod]
     _save_state(state)
 
     # What needs saying.
     loggable_on = ([m["name"] for m in data["ue4ss_mods"]
                     if m["enabled"] and not m["builtin"]]
                    + [p["name"] for p in data["pak_mods"]
-                      if not p["disabled"] and p["folder"] == "LogicMods"])
-    content_on = [p["name"] for p in data["pak_mods"]
-                  if not p["disabled"] and p["folder"] != "LogicMods"]
+                      if not p["disabled"] and p["folder"] == "LogicMods"]
+                   + [w["name"] for w in workshop if w["loggable"]])
+    content_on = ([p["name"] for p in data["pak_mods"]
+                   if not p["disabled"] and p["folder"] != "LogicMods"]
+                  + [w["name"] for w in workshop if w["enabled"] and w["applies"]
+                     and not w["loggable"] and not w["needs"] and not w["error"]])
     loaded_set = set(loaded)
 
     def label_of(build_id):
@@ -152,8 +160,54 @@ def observe(paths, data):
         "regressed": {n: label_of(verified[n]) for n in loggable_on
                       if not updated and n not in loaded_set
                       and verified.get(n) not in (None, cur["id"])},
+        # Mods switched on since the last run, by mod id ('ue4ss:Name'). The
+        # game hasn't started since, so they can't have loaded yet.
+        "waiting": sorted(switched),
     }
     return report
+
+
+def _had_its_chance(rec, run, log_mtime):
+    """Whether the game has started since a mod was switched on.
+
+    A run is told apart by when its log says it began, so switching a mod on
+    while the game is running waits for the run after it. Records from before
+    that was kept, and logs without times, go by when the log was written.
+    """
+    if isinstance(rec, dict):
+        if run is not None:
+            return rec.get("run") != run
+        rec = rec.get("when") or 0
+    return bool(log_mtime) and rec <= log_mtime
+
+
+def current_run(log_path):
+    """When the latest run in a UE4SS log began, as the log tells it."""
+    import palmods            # imports this module; kept local to avoid a cycle
+    try:
+        return palmods.parse_log(Path(log_path))["when"]
+    except OSError:
+        return None
+
+
+def switched_on(game, mod_ids, log=None):
+    """Note that these mods were just switched on, or installed switched on.
+
+    Until the game next runs they haven't had a chance to start, so they read
+    as waiting for the next launch rather than as having failed to start.
+    `log` is the UE4SS log that will show whether they did.
+    """
+    mod_ids = list(mod_ids)
+    if not mod_ids:
+        return
+    run = current_run(log) if log else None
+    state = _load_state()
+    st = state.setdefault("installs", {}).setdefault(palpaths.install_key(game), {})
+    switched = st.setdefault("switched_on", {})
+    now = time.time()
+    for mod in mod_ids:
+        switched[mod] = {"when": now, "run": run} if log else now
+    _save_state(state)
 
 
 # ==========================================================================
@@ -225,6 +279,9 @@ def pak_conflicts(pak_mods):
     """Every pair of paks that replace at least one of the same assets."""
     assets = {p["name"]: _assets(p) for p in pak_mods if p.get("files")}
     enabled = {p["name"]: not p["disabled"] for p in pak_mods}
+    # A Workshop pak is named for the list ('X_P (Workshop)'); its file name
+    # is what Unreal orders it by.
+    stems = {p["name"]: p.get("stem", p["name"]) for p in pak_mods}
     names = sorted(assets)
 
     pairs = []
@@ -233,10 +290,10 @@ def pak_conflicts(pak_mods):
             shared = assets[a] & assets[b]
             if not shared:
                 continue
-            winner = max((a, b), key=pak_priority)
+            winner = max((a, b), key=lambda n: pak_priority(stems[n]))
             loser = b if winner == a else a
             # Certain only when exactly one of the two is a patch pak.
-            sure = bool(PATCH_PAK.search(a)) != bool(PATCH_PAK.search(b))
+            sure = bool(PATCH_PAK.search(stems[a])) != bool(PATCH_PAK.search(stems[b]))
             pairs.append({
                 "mods": [a, b], "winner": winner, "loser": loser,
                 "sure": sure, "assets": len(shared),
@@ -465,7 +522,7 @@ def save_dir(game):
 
 
 def _backup_root(game):
-    tag = hashlib.sha1(_install_key(game).encode()).hexdigest()[:10]
+    tag = hashlib.sha1(palpaths.install_key(game).encode()).hexdigest()[:10]
     d = palpaths.data_dir() / "backups" / tag
     d.mkdir(parents=True, exist_ok=True)
     return d
@@ -489,7 +546,9 @@ def setup_fingerprint(data):
                  if m["enabled"] and not m["builtin"]]
                 + [p["name"] for p in data["pak_mods"] if not p["disabled"]]
                 + [f"schema:{s['name']}" for s in data.get("palschema_mods", [])
-                   if s["enabled"]])
+                   if s["enabled"]]
+                + [f"workshop:{w['name']}" for w in data.get("workshop_mods", [])
+                   if w["enabled"] and not w["error"]])
     raw = json.dumps([on, (data.get("build") or {}).get("id")])
     return hashlib.sha1(raw.encode()).hexdigest()[:12], on
 
@@ -585,7 +644,16 @@ SERVER_PROCESSES = ("palserver-win64-shipping-cmd.exe",
                     "palserver-win64-test-cmd.exe", "palserver-win64-test.exe")
 
 
+_seen_processes = (0.0, frozenset())
+
+
 def _process_names():
+    """Names of running programs. Asking Windows takes a moment, so an answer
+    is reused for a second: applying ten changes asks ten times."""
+    global _seen_processes
+    when, names = _seen_processes
+    if time.time() - when < 1.0:
+        return set(names)
     try:
         res = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
                              capture_output=True, text=True, timeout=10,
@@ -596,6 +664,7 @@ def _process_names():
     for line in res.stdout.splitlines():
         if line.startswith('"'):
             names.add(line[1:line.find('"', 1)].lower())
+    _seen_processes = (time.time(), frozenset(names))
     return names
 
 

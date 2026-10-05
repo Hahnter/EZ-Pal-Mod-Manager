@@ -17,7 +17,9 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+import palmods
 import palregistry
+from paltext import plural
 
 
 # ==========================================================================
@@ -68,21 +70,77 @@ def _size(path):
         return 0
 
 
+def _parked_mods(parked, data):
+    """Mods in a parked UE4SS that aren't installed now, by name.
+
+    Installing UE4SS with 1.0.0 parked the old ue4ss folder with its Mods
+    still inside, so for some people this is the only copy of their mods.
+    """
+    mods = parked / "Mods"
+    if not mods.is_dir():
+        return []
+    have = {m["name"].casefold() for m in data["ue4ss_mods"]}
+    out = sorted((d.name for d in mods.iterdir()
+                  if d.is_dir() and d.name not in palmods.BUILTIN
+                  and d.name.casefold() not in have and palmods.is_mod_dir(d)),
+                 key=str.casefold)
+    # A PalSchema mod is any folder in its mods\ or disabled-mods\.
+    have = {s["name"].casefold() for s in data.get("palschema_mods", [])}
+    schema = mods / "PalSchema"
+    out += sorted({d.name for sub in ("mods", palmods.PALSCHEMA_OFF)
+                   if (schema / sub).is_dir()
+                   for d in (schema / sub).iterdir()
+                   if d.is_dir() and d.name.casefold() not in have},
+                  key=str.casefold)
+    return out
+
+
+def _holds(names, most=3):
+    """'It holds A, B and C, which aren't installed now.'
+
+    Past `most`, the rest are counted. One more is named instead, since
+    '1 other mod' takes as much room as its name.
+    """
+    if len(names) > most + 1:
+        return (f"It holds {', '.join(names[:most])} and "
+                f"{plural(len(names) - most, 'other mod')} that aren't "
+                f"installed now.")
+    listed = (names[0] if len(names) == 1
+              else f"{', '.join(names[:-1])} and {names[-1]}")
+    verb = "isn't" if len(names) == 1 else "aren't"
+    return f"It holds {listed}, which {verb} installed now."
+
+
+def _holds_paks(folder):
+    try:
+        return any(f.suffix.lower() in (".pak", ".utoc", ".ucas")
+                   for f in Path(folder).rglob("*"))
+    except OSError:
+        return True
+
+
 def find_leftovers(paths, data):
     """Things on disk that belong to no installed mod.
 
     `checked` marks what is safe to remove without a second thought. Backups
     that Repair or the installer made are listed but left unticked: they are
-    inert, but someone may still want them.
+    inert, but someone may still want them. A parked UE4SS holding mods that
+    aren't installed now also carries their names in `missing`.
     """
     items = []
 
-    def add(path, kind, why, checked):
+    def add(path, kind, why, checked, **extra):
         items.append({"path": str(path), "kind": kind, "why": why,
-                      "checked": checked, "size": _size(path)})
+                      "checked": checked, "size": _size(path), **extra})
 
     game, win64, paks = paths["game"], paths["win64"], paths["paks"]
     pak_names = {p["name"].lower() for p in data["pak_mods"]}
+    # What the game put there for Steam Workshop mods is never a leftover:
+    # their paks have rows of their own, and their folders are the game's.
+    ws = paths.get("workshop") or {}
+    workshop = {w["name"].lower() for w in data.get("workshop_mods", [])}
+    if ws:
+        pak_names |= ws["own"]["logic"]
 
     for folder in (paks / "~mods", paks / "LogicMods"):
         if not folder.is_dir():
@@ -92,7 +150,9 @@ def find_leftovers(paths, data):
             stem = f.name.split(".")[0].lower()
             if f.is_dir():
                 # BPModLoaderMod reads per-mod config folders from LogicMods.
-                if folder.name == "LogicMods" and low not in pak_names:
+                # A folder holding paks is mods, not their settings.
+                if folder.name == "LogicMods" and low not in pak_names \
+                        and low not in workshop and not _holds_paks(f):
                     add(f, "orphaned folder",
                         f"config folder for '{f.name}', which isn't installed", True)
                 continue
@@ -124,12 +184,20 @@ def find_leftovers(paths, data):
             add(d, "old UE4SS backup", "backup of an earlier UE4SS install", False)
     # The UE4SS installer keeps whatever it replaced, rather than deleting it.
     for d in sorted(win64.glob("*.pmm-old-*")):
-        add(d, "old UE4SS", "the UE4SS this app replaced, kept in case you "
-                             "want it back", False)
+        missing = _parked_mods(d, data) if d.is_dir() else []
+        if missing:
+            add(d, "old UE4SS with mods", _holds(missing), False,
+                missing=missing)
+        else:
+            add(d, "old UE4SS", "the UE4SS this app replaced, kept in case you "
+                                 "want it back", False)
 
+    ws_mods = ws.get("runtime", {}).get("mods")
     for _, root in paths["mod_roots"]:
         for d in sorted(root.iterdir()):
             if not d.is_dir() or d.name == "shared":
+                continue
+            if root == ws_mods and palmods.workshop_owns(paths, "ue4ss", d.name):
                 continue
             if (d / "Scripts" / "main.lua").is_file() or (d / "dlls" / "main.dll").is_file():
                 continue
@@ -201,6 +269,7 @@ def write_load_order(paths, entries):
 # shareable modlists
 # ==========================================================================
 FORMAT = "pal-mod-manager-modlist"
+WORKSHOP = "Steam Workshop mod"
 
 
 def _version(name, reg, fallback=None):
@@ -230,6 +299,12 @@ def export_modlist(data, only_enabled=True):
             else "content pak", not p["disabled"])
     for s in data.get("palschema_mods", []):
         add(s["name"], "PalSchema mod", s["enabled"])
+    for w in data.get("workshop_mods", []):
+        if w["error"] or (only_enabled and not w["enabled"]):
+            continue
+        mods.append({"name": w["name"], "kind": WORKSHOP, "enabled": w["enabled"],
+                     "title": w["title"], "version": w["version"] or None,
+                     "source": "Steam Workshop", "url": w["url"]})
 
     return {
         "format": FORMAT, "version": 1,
@@ -246,14 +321,15 @@ def modlist_text(doc):
     lines = [f"Palworld mods ({len(doc['mods'])})"]
     if doc.get("game") or doc.get("ue4ss"):
         lines.append(" · ".join(x for x in (doc.get("game"), doc.get("ue4ss")) if x))
-    for kind in ("UE4SS mod", "blueprint pak", "content pak", "PalSchema mod"):
+    for kind in ("UE4SS mod", "blueprint pak", "content pak", "PalSchema mod",
+                 WORKSHOP):
         group = [m for m in doc["mods"] if m["kind"] == kind]
         if not group:
             continue
         lines.append("")
         lines.append(f"{kind}s:")
         for m in group:
-            bits = [f"- {m['name']}"]
+            bits = [f"- {m.get('title') or m['name']}"]
             if m.get("version"):
                 bits.append(f"v{m['version']}")
             if m.get("url") and m["url"].startswith("http"):
@@ -283,6 +359,9 @@ def compare_modlist(doc, data):
         mine[p["name"]] = (not p["disabled"], _version(p["name"], reg))
     for s in data.get("palschema_mods", []):
         mine[s["name"]] = (s["enabled"], None)
+    for w in data.get("workshop_mods", []):
+        if not w["error"]:
+            mine[w["name"]] = (w["enabled"], w["version"] or None)
 
     theirs_on = {m["name"]: m for m in doc["mods"] if m.get("enabled", True)}
     missing = [m for n, m in theirs_on.items() if n not in mine]
