@@ -20,6 +20,13 @@ def zip_dir(src, out, prefix=""):
     return out
 
 
+def add_pak(stem, asset):
+    """Install a bare pak holding one asset, which decides its folder."""
+    plan = palinstall.inspect(fake_pak(SB / f"{stem}.pak", "../../../", [asset]))
+    palinstall.apply(plan)
+    palinstall.discard(plan)
+
+
 check.section("hybrid archive with the full game path")
 src = SB / "src1"
 mod = src / "Pal/Binaries/Win64/ue4ss/Mods/CoolMod"
@@ -120,5 +127,33 @@ palinstall.discard(plan)
 palmods.set_enabled("CoolMod", False)
 palinstall.uninstall("CoolMod")
 check("disabled mod fully uninstalled", not (win64 / "ue4ss/Mods/CoolMod").exists())
+
+check.section("paks share ~mods and LogicMods")
+mods, logic = paks / "~mods", paks / "LogicMods"
+# TextureSwap is in ~mods already, so this is one pak of two.
+add_pak("PakA_P", "Pal/Content/Pal/Texture/T_A.uasset")
+roots = palregistry.receipt("PakA_P")["roots"]
+check("a pak's receipt names no folder of its own", roots == [], roots)
+removed, notes = palinstall.uninstall("PakA_P")
+check("removing one pak of two takes just its file, with no note",
+      [p.name for p in removed] == ["PakA_P.pak"] and notes == [], (removed, notes))
+notes = palinstall.uninstall("TextureSwap")[1]
+check("removing the last pak keeps ~mods",
+      mods.is_dir() and not any(mods.iterdir()) and notes == [], notes)
+
+# Receipts saved by earlier versions name the folder a pak sits in as its
+# root, and are still on people's machines. CoolModBP_P is in LogicMods.
+add_pak("PakB_P", "Pal/Content/Mods/PakB/ModActor.uasset")
+add_pak("PakC_P", "Pal/Content/Pal/Texture/T_C.uasset")
+for name, folder in (("CoolModBP_P", logic), ("PakB_P", logic), ("PakC_P", mods)):
+    rec = palregistry.receipt(name)
+    palregistry.save_receipt(name, rec["files"], roots=[folder],
+                             shipped=rec["shipped"])
+notes = palinstall.uninstall("PakB_P")[1]
+check("old receipt: removing one pak of two gives no note", notes == [], notes)
+notes = palinstall.uninstall("CoolModBP_P")[1] + palinstall.uninstall("PakC_P")[1]
+check("old receipt: removing the last pak keeps LogicMods and ~mods",
+      logic.is_dir() and not any(logic.iterdir())
+      and mods.is_dir() and not any(mods.iterdir()) and notes == [], notes)
 
 check.finish()

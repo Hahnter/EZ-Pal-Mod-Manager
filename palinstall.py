@@ -500,7 +500,10 @@ def apply(plan, components=None, enable=True, backup=True, link=None):
         for old in before:
             if old.exists() and old not in written:
                 written.append(old)
-        palregistry.save_receipt(c["name"], written, roots=[c["dest"]],
+        # A pak has no folder of its own. Its dest is ~mods or LogicMods,
+        # which hold every pak, so there is no folder for uninstall to take.
+        roots = [] if c["kind"] in (LOGIC_PAK, CONTENT_PAK) else [c["dest"]]
+        palregistry.save_receipt(c["name"], written, roots=roots,
                                  shipped=shipped)
         palregistry.record_install(
             c["name"], archive=plan["source"],
@@ -553,6 +556,13 @@ def discard(plan):
 # --------------------------------------------------------------------------
 # removal
 # --------------------------------------------------------------------------
+def _shared_pak_folder(path):
+    """Whether `path` is a ~mods or LogicMods folder, which every pak shares."""
+    low = [s.lower() for s in Path(path).parts]
+    return low[-4:] in (["pal", "content", "paks", "~mods"],
+                        ["pal", "content", "paks", "logicmods"])
+
+
 def uninstall(name, mod_path=None, pak_path=None):
     """Delete a mod. A receipt makes this exact; without one we fall back.
 
@@ -582,6 +592,10 @@ def uninstall(name, mod_path=None, pak_path=None):
         # with Scripts/ would otherwise never be fully removed.
         for r in rec.get("roots", []):
             root = Path(r)
+            # Receipts saved by earlier versions name the folder a pak sits
+            # in as its own. That folder holds every pak, so leave it alone.
+            if _shared_pak_folder(root):
+                continue
             if root.is_dir() and not any(f.is_file() for f in root.rglob("*")):
                 shutil.rmtree(root, ignore_errors=True)
             elif root.is_dir():
