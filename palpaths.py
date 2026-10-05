@@ -20,7 +20,10 @@ runtime is a temp directory that is deleted on exit.
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 STEAM_APPID = "1623730"
@@ -68,6 +71,109 @@ def bundled_dir():
     return Path(__file__).resolve().parent
 
 
+# --------------------------------------------------------------------------
+# crash-safe files
+# --------------------------------------------------------------------------
+def backup_of(path):
+    """Where a save keeps the version it replaced: <name>.bak."""
+    p = Path(path)
+    return p.with_name(p.name + ".bak")
+
+
+def _replace(src, dst):
+    # Windows refuses to rename over a file another program has open -- an
+    # antivirus scan, the search indexer -- usually only for a moment.
+    for wait in (0.05, 0.1, 0.2, 0.4, None):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if wait is None:
+                raise
+            time.sleep(wait)
+
+
+def write_bytes(path, data):
+    """Replace a file so that it is never left half-written.
+
+    A plain write cut off by a crash, a power cut or an antivirus lock leaves
+    a truncated file, and a store that reads that as empty then saves the
+    emptiness back over everything it held. Here the new bytes go to a temp
+    file beside the old one and are flushed to disk, the old file is kept as
+    <name>.bak, and one rename swaps the new file in. Interrupted anywhere,
+    the file is all old or all new.
+    """
+    path = Path(path)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp",
+                               dir=path.parent)
+    try:
+        with open(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        if path.is_file():
+            shutil.copyfile(path, backup_of(path))
+        _replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def write_text(path, text, newline=None):
+    """write_bytes for text. `newline` means what it does to open(): None
+    writes the platform's line endings, "" writes the text as given."""
+    if newline is None:
+        newline = os.linesep
+    if newline not in ("", "\n"):
+        text = text.replace("\n", newline)
+    write_bytes(path, text.encode("utf8"))
+
+
+def write_json(path, data, indent=2, sort_keys=False):
+    write_text(path, json.dumps(data, indent=indent, sort_keys=sort_keys) + "\n")
+
+
+def read_json(path):
+    """A JSON store's contents (a dict), or None if there is no usable copy.
+
+    A file that doesn't parse is never treated as simply empty: the next save
+    would write that emptiness over whatever it held. It is moved aside as
+    <name>.corrupt-<time>, and the <name>.bak from the save before is put back
+    in its place if that one is whole.
+    """
+    path = Path(path)
+    if not path.is_file():
+        return None
+    for f in (path, backup_of(path)):
+        if not f.is_file():
+            break
+        raw = f.read_bytes()
+        try:
+            data = json.loads(raw)          # bytes: a BOM or UTF-16 is fine too
+        except ValueError:
+            data = None
+        if isinstance(data, dict):
+            if f != path:
+                write_bytes(path, raw)      # put the good copy back
+            return data
+        _set_aside(f)
+    return None
+
+
+def _set_aside(path):
+    """Keep an unreadable file as <name>.corrupt-<time>, out of harm's way."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    dest, n = path.with_name(f"{path.name}.corrupt-{stamp}"), 1
+    while dest.exists():
+        n += 1
+        dest = path.with_name(f"{path.name}.corrupt-{stamp}-{n}")
+    _replace(path, dest)
+    return dest
+
+
 SETTINGS_FILE = "settings.json"
 
 DEFAULTS = {
@@ -81,23 +187,16 @@ DEFAULTS = {
 
 
 def load_settings():
-    f = data_dir() / SETTINGS_FILE
     out = dict(DEFAULTS)
-    if f.is_file():
-        try:
-            data = json.loads(f.read_text("utf8"))
-            if isinstance(data, dict):
-                out.update({k: v for k, v in data.items() if k in DEFAULTS})
-        except ValueError:
-            pass
+    data = read_json(data_dir() / SETTINGS_FILE) or {}
+    out.update({k: v for k, v in data.items() if k in DEFAULTS})
     return out
 
 
 def save_settings(settings):
-    f = data_dir() / SETTINGS_FILE
     merged = load_settings()
     merged.update(settings)
-    f.write_text(json.dumps(merged, indent=2) + "\n", "utf8")
+    write_json(data_dir() / SETTINGS_FILE, merged)
     return merged
 
 

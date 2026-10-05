@@ -14,12 +14,14 @@ Tkinter only, so it runs on a stock Python and freezes to a single .exe.
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
 import time
 import tkinter as tk
 import tkinter.font as tkfont
+import traceback
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog
 
@@ -1931,14 +1933,199 @@ def _dark_titlebar(window):
         pass
 
 
+# ============================================================== errors
+ERROR_LOG = "error.log"
+
+
+def scrub(text):
+    """`text` with the home folder written as %USERPROFILE%.
+
+    Tracebacks are full of paths, and the home folder is usually named after
+    its owner. A repr()'d path doubles its backslashes, so those count too.
+    """
+    home = os.path.expanduser("~")
+    parts = [p for p in re.split(r"[\\/]+", home) if p]
+    if not os.path.isabs(home) or len(parts) < 2:
+        return text
+    sep = r"(?:\\\\|[\\/])"
+    return re.sub(sep.join(map(re.escape, parts)) + r"(?![\w.-])",
+                  "%USERPROFILE%", text, flags=re.I)
+
+
+def log_error(details):
+    """Append a report to error.log. Returns the log's path, or None if even
+    that failed: reporting an error must never raise one of its own."""
+    try:
+        win = getattr(sys, "getwindowsversion", lambda: None)()
+        system = f"Windows {win.major}.{win.minor}.{win.build}" if win else sys.platform
+        build = "exe" if getattr(sys, "frozen", False) else "source"
+        log = palpaths.data_dir() / ERROR_LOG
+        with open(log, "a", encoding="utf8") as f:
+            f.write(f"=== {time.strftime('%Y-%m-%d %H:%M:%S')}   {system}   "
+                    f"Python {sys.version.split()[0]} ({build})\n"
+                    f"{details.rstrip()}\n\n")
+        return log
+    except Exception:                      # noqa: BLE001 - see docstring
+        return None
+
+
+def _message_box(details, log):
+    """Windows' own dialog, for when Tk itself is what failed. Ctrl+C in it
+    copies everything it says."""
+    head = "Something went wrong." + (" Details were saved to error.log."
+                                      if log else "")
+    tail = "\n".join(details.strip().splitlines()[-12:])
+    try:
+        import ctypes
+        MB_ICONERROR, MB_SETFOREGROUND, MB_TOPMOST = 0x10, 0x10000, 0x40000
+        ctypes.windll.user32.MessageBoxW(
+            None, f"{head}\n\nPress Ctrl+C to copy this message.\n\n{tail}",
+            "EZ Pal Mod Manager", MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST)
+    except (ImportError, AttributeError, OSError):
+        pass
+
+
+class ErrorDialog(tk.Toplevel):
+    """'Something went wrong', with the details one click from a bug report."""
+
+    def __init__(self, master, details, log):
+        super().__init__(master)
+        self.details = details
+        self.title("EZ Pal Mod Manager")
+        self.configure(bg=BG)
+        self.resizable(False, False)
+        self.attributes("-topmost", True)
+
+        body = tk.Frame(self, bg=BG)
+        body.pack(fill="x", padx=22, pady=(18, 14))
+        tk.Label(body, text="Something went wrong", bg=BG, fg=TEXT,
+                 font=(TITLE_FONT, 14), anchor="w").pack(fill="x")
+        tk.Label(body, text="Details were saved to error.log." if log else
+                 "The details couldn't be saved, so copy them before you close "
+                 "this.", bg=BG, fg=DIM, font=(BODY_FONT, 10), anchor="w",
+                 justify="left", wraplength=400).pack(fill="x", pady=(4, 0))
+
+        foot = tk.Frame(self, bg=BG)
+        foot.pack(fill="x", padx=22, pady=(0, 18))
+        self.copy_btn = button(foot, "Copy details", self.copy, "primary",
+                               (STRONG_FONT, 10), (16, 6))
+        self.copy_btn.pack(side="right")
+        if log:
+            button(foot, "Show error.log", lambda: open_in_explorer(log),
+                   "quiet", (BODY_FONT, 9), (12, 6)).pack(side="right", padx=8)
+        button(foot, "Close", self.destroy, "ghost",
+               (BODY_FONT, 9)).pack(side="right")
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.after(10, lambda: dark_titlebar(self))
+        # A window holding the grab (Setup does) would swallow every click
+        # meant for this one; borrow the grab and give it back after.
+        self._prior_grab = self.grab_current()
+        self.grab_set()
+        self.lift()
+        self.focus_force()
+
+    def copy(self):
+        self.clipboard_clear()
+        self.clipboard_append(self.details)
+        self.copy_btn.config(text="Copied")
+
+    def destroy(self):
+        prior = getattr(self, "_prior_grab", None)
+        super().destroy()
+        try:
+            if prior is not None and prior.winfo_exists():
+                prior.grab_set()
+        except tk.TclError:
+            pass
+
+
+class ErrorReporter:
+    """Every unexpected error ends up in error.log and in front of the user.
+
+    The release is a windowed build, so sys.stderr is None: Tk's default
+    report_callback_exception, like the default thread and top-level hooks,
+    prints its traceback to nowhere, and a broken button just does nothing.
+    """
+
+    def __init__(self):
+        self.root = None
+        self.seen = set()              # each distinct error is reported once
+        self.showing = False
+        self.later = queue.Queue()     # from other threads, for the Tk thread
+        sys.excepthook = self.fatal
+        threading.excepthook = lambda a: self.report(
+            a.exc_type, a.exc_value, a.exc_traceback, thread=a.thread)
+
+    def attach(self, root):
+        self.root = root
+        root.report_callback_exception = self.report
+        self._drain()
+
+    def report(self, kind, exc, tb, thread=None):
+        if issubclass(kind, (SystemExit, KeyboardInterrupt)):
+            return
+        if sys.stderr:                 # run from a console: say it there too
+            traceback.print_exception(kind, exc, tb)
+        # One report per bug, not per occurrence: a failing repaint or timer
+        # would otherwise bury the user in dialogs.
+        where = (kind, tuple((f.filename, f.lineno)
+                             for f in traceback.extract_tb(tb)))
+        if where in self.seen:
+            return
+        self.seen.add(where)
+        details = scrub("".join(traceback.format_exception(kind, exc, tb)))
+        if thread is not None:
+            details = f"In the {thread.name} thread:\n{details}"
+        log = log_error(details)
+        if thread is not None:
+            self.later.put((details, log))      # Tk belongs to the main thread
+        else:
+            self.show(details, log)
+
+    def fatal(self, kind, exc, tb):
+        """sys.excepthook: the app can't carry on, so this is its last word."""
+        self.report(kind, exc, tb)
+        if self.root is not None:
+            # Tk hands copied text over to Windows when its windows close;
+            # left to the process exit, the clipboard would come up empty.
+            try:
+                self.root.destroy()
+            except tk.TclError:
+                pass
+
+    def show(self, details, log):
+        if self.showing:
+            return                     # already in error.log; one at a time
+        self.showing = True
+        try:
+            ErrorDialog(self.root, details, log).wait_window()
+        except (tk.TclError, RuntimeError):
+            _message_box(details, log)
+        finally:
+            self.showing = False
+
+    def _drain(self):
+        try:
+            while True:
+                self.show(*self.later.get_nowait())
+        except queue.Empty:
+            pass
+        try:
+            self.root.after(400, self._drain)
+        except tk.TclError:
+            pass                       # the app is closing
+
+
 def main():
     _dpi_aware()
+    errors = ErrorReporter()           # from here on nothing fails silently
 
     # Launched with files (several zips dragged onto the exe, or Open With):
     # go straight to the installer for each.
     pending = [a for a in sys.argv[1:] if Path(a).exists()] or None
 
     root = tk.Tk()
+    errors.attach(root)
     try:
         # Tk sizes fonts in points against its own idea of DPI; match the
         # screen so text scales with the window rather than staying tiny.
@@ -1958,4 +2145,11 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception:
+        # A windowed PyInstaller build reports an exception that escapes the
+        # script with a dialog of its own; give it to our hook first, so it
+        # is logged and scrubbed the same way as every other error.
+        sys.excepthook(*sys.exc_info())
+        sys.exit(1)

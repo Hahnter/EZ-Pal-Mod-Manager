@@ -60,14 +60,9 @@ def _legacy_registry():
 
 
 def load_registry():
-    f = _file("registry.json")
-    if f.is_file():
-        try:
-            data = json.loads(f.read_text("utf8"))
-            if isinstance(data, dict):
-                return {k: v for k, v in data.items() if not k.startswith("_")}
-        except ValueError:
-            pass
+    data = palpaths.read_json(_file("registry.json"))
+    if data is not None:
+        return {k: v for k, v in data.items() if not k.startswith("_")}
     # First run after the move: adopt whatever was maintained by hand.
     seeded = _legacy_registry()
     if seeded:
@@ -76,8 +71,7 @@ def load_registry():
 
 
 def save_registry(reg):
-    _file("registry.json").write_text(json.dumps(reg, indent=2, sort_keys=True)
-                                      + "\n", "utf8")
+    palpaths.write_json(_file("registry.json"), reg, sort_keys=True)
 
 
 def get(name):
@@ -249,15 +243,7 @@ def record_install(mod, archive=None, extra=None):
 # install receipts
 # --------------------------------------------------------------------------
 def _receipts():
-    f = _file("receipts.json")
-    if f.is_file():
-        try:
-            data = json.loads(f.read_text("utf8"))
-            if isinstance(data, dict):
-                return data
-        except ValueError:
-            pass
-    return {}
+    return palpaths.read_json(_file("receipts.json")) or {}
 
 
 def save_receipt(name, files, roots=(), shipped=None):
@@ -274,7 +260,7 @@ def save_receipt(name, files, roots=(), shipped=None):
         "roots": [str(r) for r in roots],
         "shipped": {str(k): v for k, v in (shipped or {}).items()},
     }
-    _file("receipts.json").write_text(json.dumps(data, indent=2) + "\n", "utf8")
+    palpaths.write_json(_file("receipts.json"), data)
 
 
 def receipt(name):
@@ -289,22 +275,14 @@ def shipped_hashes(name):
 def drop_receipt(name):
     data = _receipts()
     if data.pop(name, None) is not None:
-        _file("receipts.json").write_text(json.dumps(data, indent=2) + "\n", "utf8")
+        palpaths.write_json(_file("receipts.json"), data)
 
 
 # --------------------------------------------------------------------------
 # profiles
 # --------------------------------------------------------------------------
 def _profiles():
-    f = _file("profiles.json")
-    if f.is_file():
-        try:
-            data = json.loads(f.read_text("utf8"))
-            if isinstance(data, dict):
-                return data
-        except ValueError:
-            pass
-    return {}
+    return palpaths.read_json(_file("profiles.json")) or {}
 
 
 def profile_names():
@@ -323,7 +301,7 @@ def save_profile(name, enabled_names, all_names):
         "enabled": sorted(enabled_names),
         "known": sorted(all_names),
     }
-    _file("profiles.json").write_text(json.dumps(data, indent=2) + "\n", "utf8")
+    palpaths.write_json(_file("profiles.json"), data)
 
 
 def load_profile(name):
@@ -333,4 +311,4 @@ def load_profile(name):
 def delete_profile(name):
     data = _profiles()
     if data.pop(name, None) is not None:
-        _file("profiles.json").write_text(json.dumps(data, indent=2) + "\n", "utf8")
+        palpaths.write_json(_file("profiles.json"), data)
