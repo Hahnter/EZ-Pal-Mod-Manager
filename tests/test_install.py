@@ -121,4 +121,27 @@ palmods.set_enabled("CoolMod", False)
 palinstall.uninstall("CoolMod")
 check("disabled mod fully uninstalled", not (win64 / "ue4ss/Mods/CoolMod").exists())
 
+check.section("uninstall a switched-off PalSchema mod")
+# Switching one off moves its whole folder to disabled-mods, while its receipt
+# still names mods\. One uninstall has to find it there and take all of it.
+schema = win64 / "ue4ss/Mods/PalSchema"
+rates = SB / "Rates.zip"
+with zipfile.ZipFile(rates, "w") as z:
+    z.writestr("Pal/Binaries/Win64/ue4ss/Mods/PalSchema/mods/Rates/raw/rates.json", "{}")
+plan = palinstall.inspect(rates)
+palinstall.apply(plan)
+palinstall.discard(plan)
+palmods.set_enabled("Rates", False)
+check("switching off moves it to disabled-mods",
+      (schema / "disabled-mods/Rates/raw/rates.json").is_file()
+      and not (schema / "mods/Rates").exists())
+removed, notes = palinstall.uninstall("Rates")
+check("one uninstall removes its file", len(removed) == 1 and notes == [],
+      (removed, notes))
+check("its folder is gone from both places",
+      not (schema / "disabled-mods/Rates").exists()
+      and not (schema / "mods/Rates").exists())
+check("and it is no longer listed",
+      "Rates" not in [m["name"] for m in scan(game)[1]["palschema_mods"]])
+
 check.finish()

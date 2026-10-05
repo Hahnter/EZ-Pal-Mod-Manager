@@ -553,6 +553,23 @@ def discard(plan):
 # --------------------------------------------------------------------------
 # removal
 # --------------------------------------------------------------------------
+def _places(path, name):
+    """A receipt's path for `name` as recorded, then where it is while off.
+
+    Switching off a PalSchema mod moves its whole folder from
+    PalSchema\\mods\\<name> to PalSchema\\disabled-mods\\<name>, and the
+    receipt still names the old place. Both are tried: a mod switched off and
+    then installed again has a copy in each. Any other path has one place.
+    """
+    p = Path(path)
+    low = [s.lower() for s in p.parts]
+    for i in range(len(low) - 2):
+        if low[i:i + 3] == ["palschema", "mods", name.lower()]:
+            return [p, Path(*p.parts[:i + 1], palmods.PALSCHEMA_OFF,
+                            *p.parts[i + 2:])]
+    return [p]
+
+
 def uninstall(name, mod_path=None, pak_path=None):
     """Delete a mod. A receipt makes this exact; without one we fall back.
 
@@ -568,24 +585,26 @@ def uninstall(name, mod_path=None, pak_path=None):
             # A receipted file may have been renamed since: disabling a mod
             # moves enabled.txt aside, and saving a config leaves a backup.
             # Missing those left the folder non-empty and so undeletable.
-            for cand in (p, p.with_suffix(p.suffix + ".disabled"),
-                         p.with_suffix(p.suffix + ".pmm-bak"),
-                         p.with_suffix(p.suffix + ".bak")):
-                try:
-                    if cand.is_file():
-                        cand.unlink()
-                        removed.append(cand)
-                except OSError as exc:
-                    notes.append(f"could not delete {cand.name}: {exc}")
+            # Switching off a PalSchema mod moves the file, folder and all.
+            for q in _places(p, name):
+                for cand in (q, q.with_suffix(q.suffix + ".disabled"),
+                             q.with_suffix(q.suffix + ".pmm-bak"),
+                             q.with_suffix(q.suffix + ".bak")):
+                    try:
+                        if cand.is_file():
+                            cand.unlink()
+                            removed.append(cand)
+                    except OSError as exc:
+                        notes.append(f"could not delete {cand.name}: {exc}")
         # Take the folders too, but only if no files of anyone else's remain.
         # Empty directories left behind by the deletion do not count -- a mod
         # with Scripts/ would otherwise never be fully removed.
         for r in rec.get("roots", []):
-            root = Path(r)
-            if root.is_dir() and not any(f.is_file() for f in root.rglob("*")):
-                shutil.rmtree(root, ignore_errors=True)
-            elif root.is_dir():
-                notes.append(f"kept {root.name}: files remain that we did not install")
+            for root in _places(r, name):
+                if root.is_dir() and not any(f.is_file() for f in root.rglob("*")):
+                    shutil.rmtree(root, ignore_errors=True)
+                elif root.is_dir():
+                    notes.append(f"kept {root.name}: files remain that we did not install")
         palregistry.drop_receipt(name)
     else:
         notes.append("no install record - removing what is on disk")
