@@ -65,19 +65,11 @@ def _state_file():
 
 
 def _load_state():
-    f = _state_file()
-    if f.is_file():
-        try:
-            data = json.loads(f.read_text("utf8"))
-            if isinstance(data, dict):
-                return data
-        except ValueError:
-            pass
-    return {}
+    return palpaths.read_json(_state_file()) or {}
 
 
 def _save_state(state):
-    _state_file().write_text(json.dumps(state, indent=2) + "\n", "utf8")
+    palpaths.write_json(_state_file(), state)
 
 
 def _install_key(game):

@@ -624,7 +624,7 @@ def set_enabled(name, on):
                 for e in data:
                     if e.get("mod_name") == name:
                         e["mod_enabled"] = on
-                        js.write_text(json.dumps(data, indent=4) + "\n", "utf8")
+                        palpaths.write_json(js, data, indent=4)
                         break
             except ValueError:
                 pass
@@ -638,7 +638,7 @@ def set_enabled(name, on):
                 if m and m.group(2) == name and not body.lstrip().startswith(";"):
                     lines[i] = (f"{m.group(1)}{name}{m.group(3)}{int(on)}{m.group(5)}"
                                 + ln[len(body):])
-                    txt.write_text("".join(lines), "utf8", newline="")
+                    palpaths.write_text(txt, "".join(lines), newline="")
                     break
         return f"UE4SS mod '{name}' -> {'enabled' if on else 'disabled'} (applies next launch)"
 
@@ -799,19 +799,19 @@ def load_config(path):
 def save_config(path, updates):
     """Write changed values back, preserving comments and layout.
 
-    `updates` maps field id -> new value. A .bak copy is made first.
+    `updates` maps field id -> new value. The file is replaced whole, never
+    edited in place, and the version it replaces is kept as <name>.bak.
     """
     path = Path(path)
     if not updates:
         return "No changes."
-    backup = path.with_suffix(path.suffix + ".bak")
-    backup.write_bytes(path.read_bytes())
+    backup = palpaths.backup_of(path)
     kind = config_kind(path)
 
     if kind == "json":
         data = json.loads(path.read_text("utf8", "replace"))
         data.update(updates)
-        path.write_text(json.dumps(data, indent=2) + "\n", "utf8")
+        palpaths.write_json(path, data)
         return f"Saved {len(updates)} setting(s); backup at {backup.name}"
 
     lines = path.read_text("utf8", "replace").splitlines(keepends=True)
@@ -826,7 +826,7 @@ def save_config(path, updates):
             new = "true" if new else "false"
         eol = "\n" if lines[i].endswith("\n") else ""
         lines[i] = f"{m.group(1)}{m.group(2)}{m.group(3)}{new}{m.group(5)}{eol}"
-    path.write_text("".join(lines), "utf8")
+    palpaths.write_text(path, "".join(lines))
     return f"Saved {len(updates)} setting(s); backup at {backup.name}"
 
 

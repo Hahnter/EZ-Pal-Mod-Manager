@@ -294,6 +294,13 @@ Everything this tool generates lives in `%LOCALAPPDATA%\PalModManager`:
 Nothing is written next to the program. The release is a one-file build, and
 that folder is a temp directory deleted when the app closes.
 
+Settings, the registry, receipts, profiles and state are never edited in
+place. Each save is written to a new file and swapped in whole, so a crash or a
+power cut can't leave half a file behind, and the version before is kept as
+`<name>.bak`. A file that won't read is never written over: it's kept as
+`<name>.corrupt-<time>` and the `.bak` takes its place. UE4SS's `mods.txt` and
+`mods.json` are saved the same way when you switch a mod on or off.
+
 ## The in-game panel
 
 An optional read-only UMG panel, F8 in game, listing what's installed. It exists
