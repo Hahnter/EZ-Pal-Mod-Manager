@@ -1945,11 +1945,14 @@ def scrub(text):
     """
     home = os.path.expanduser("~")
     parts = [p for p in re.split(r"[\\/]+", home) if p]
-    if not os.path.isabs(home) or len(parts) < 2:
+    # A Windows home starts at its drive letter, the first part. One that
+    # starts at the root (/home/me) has a leading slash that belongs to it.
+    rooted = home[:1] in ("\\", "/")
+    if not os.path.isabs(home) or len(parts) < (1 if rooted else 2):
         return text
     sep = r"(?:\\\\|[\\/])"
-    return re.sub(sep.join(map(re.escape, parts)) + r"(?![\w.-])",
-                  "%USERPROFILE%", text, flags=re.I)
+    return re.sub((sep if rooted else "") + sep.join(map(re.escape, parts))
+                  + r"(?![\w.-])", "%USERPROFILE%", text, flags=re.I)
 
 
 def log_error(details):
