@@ -63,6 +63,13 @@
   now include PalSchema mods, as the app's always did. Profiles saved earlier
   still load; a plain name in one applies to every mod of that name.
 
+- Uninstalling a pak deleted the whole `~mods` or `LogicMods` folder when
+  nothing else was left in it. While other paks were still there, it showed
+  "kept ~mods: files remain that we did not install" instead. Every pak
+  shares those folders, so an uninstall now removes just that pak's files and
+  leaves the folder alone. This also applies to paks installed by earlier
+  versions.
+
 ## 1.0.0 - first public release
 
 **It can set up UE4SS and PalSchema for you**
