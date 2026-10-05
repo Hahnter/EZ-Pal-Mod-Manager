@@ -723,11 +723,14 @@ class CleanupWindow(Window):
                 rel = it["path"]
             tk.Label(top, text=Path(it["path"]).name, bg=RAISED, fg=TEXT,
                      font=self.app.f_name).pack(side="left")
-            Pill(top, it["kind"], DIM, SURFACE, RAISED, self.app.f_pill).pack(side="left", padx=8)
+            # An old UE4SS holding mods that aren't installed may be the only
+            # copy of them.
+            Pill(top, it["kind"], WARN if it.get("missing") else DIM, SURFACE,
+                 RAISED, self.app.f_pill).pack(side="left", padx=8)
             tk.Label(top, text=human_size(it["size"]), bg=RAISED, fg=FAINT,
                      font=self.app.f_small).pack(side="right")
             tk.Label(col, text=it["why"], bg=RAISED, fg=DIM, font=self.app.f_small,
-                     anchor="w").pack(fill="x")
+                     anchor="w", wraplength=620, justify="left").pack(fill="x")
             tk.Label(col, text=rel, bg=RAISED, fg=FAINT, font=self.app.f_small,
                      anchor="w", wraplength=620, justify="left").pack(fill="x")
         self._count()

@@ -173,6 +173,27 @@ print("\n== leftovers ==")
 (mods / "Husk").mkdir()
 (mods / "Husk/enabled.txt").write_text("")
 (game / "Pal/Binaries/Win64/UE4SS.log.bak").write_text("old")
+# UE4SS folders the installer parked. Installing with 1.0.0 parked ue4ss\Mods
+# along with the rest, so one can hold the only copy of someone's mods.
+win64 = game / "Pal/Binaries/Win64"
+old = win64 / "ue4ss.pmm-old-20261001-1200"
+for name in ("Alpha", "beta", "Zed", "BPModLoaderMod", "shared"):
+    lua_mod(old / "Mods", name)              # Alpha and Beta are installed;
+                                             # case doesn't matter on Windows
+(old / "Mods/Gone/dlls").mkdir(parents=True)
+(old / "Mods/Gone/dlls/main.dll").write_bytes(b"x")
+(old / "Mods/OffLost").mkdir()
+(old / "Mods/OffLost/enabled.txt.disabled").write_text("")
+(old / "Mods/Notes").mkdir()
+(old / "Mods/Notes/readme.txt").write_text("not a mod")
+(old / "Mods/mods.txt").write_text("Zed : 1\n")
+(old / "Mods/PalSchema/dlls").mkdir(parents=True)
+(old / "Mods/PalSchema/dlls/main.dll").write_bytes(b"x")
+for sub in ("mods/BetterRates", "mods/OldRates", "disabled-mods/OffRates"):
+    (old / "Mods/PalSchema" / sub).mkdir(parents=True)
+lua_mod(win64 / "ue4ss.pmm-old-20261002-0900/Mods", "Alpha")
+lua_mod(win64 / "ue4ss.pmm-old-20261003-0900/Mods", "Solo")
+(win64 / "UE4SS.dll.pmm-old-20261001-1200").write_bytes(b"x")
 paths, data = use(game)
 left = {Path(i["path"]).name: i for i in paltools.find_leftovers(paths, data)}
 check("orphaned config found + ticked", left.get("Ghost.modconfig.json", {}).get("checked"))
@@ -184,6 +205,31 @@ check("parked UE4SS file listed but unticked", "UE4SS.log.bak" in left and not l
 victims = [left["Ghost.modconfig.json"]["path"], left["Husk"]["path"]]
 ok = paltools.recycle(victims)
 check("recycle bin removal succeeded", ok and not any(Path(v).exists() for v in victims))
+
+parked = left.get(old.name, {})
+check("old UE4SS holding mods that aren't installed has its own kind",
+      parked.get("kind") == "old UE4SS with mods", parked.get("kind"))
+check("names mods and PalSchema mods; skips installed, built-in and non-mods",
+      parked.get("missing") == ["Gone", "OffLost", "Zed", "OffRates", "OldRates"],
+      parked.get("missing"))
+check("why names the first three and counts the rest",
+      parked.get("why") == "It holds Gone, OffLost, Zed and 2 other mods "
+                           "that aren't installed now.", parked.get("why"))
+check("old UE4SS holding mods stays unticked", parked and not parked["checked"])
+solo = left.get("ue4ss.pmm-old-20261003-0900", {})
+check("one mod: named in a sentence",
+      solo.get("why") == "It holds Solo, which isn't installed now.", solo.get("why"))
+plain = left.get("ue4ss.pmm-old-20261002-0900", {})
+check("old UE4SS whose mods are all installed: plain entry",
+      plain.get("kind") == "old UE4SS" and "missing" not in plain, plain)
+check("parked UE4SS.dll: plain entry",
+      left.get("UE4SS.dll.pmm-old-20261001-1200", {}).get("kind") == "old UE4SS")
+lua_mod(mods, "Zed")                         # put back by hand
+paths, data = use(game)
+again = {Path(i["path"]).name: i for i in paltools.find_leftovers(paths, data)}
+check("a mod put back is no longer named; four are all named",
+      again[old.name]["why"] == "It holds Gone, OffLost, OffRates and OldRates, "
+                                "which aren't installed now.", again[old.name]["why"])
 
 # ======================================================== load order
 print("\n== load order ==")
