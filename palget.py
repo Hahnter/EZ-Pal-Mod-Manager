@@ -212,7 +212,9 @@ def download(rel, into, progress=None):
     """Fetch a release's zip. `progress(done, total)` is called as it goes."""
     into = Path(into)
     into.mkdir(parents=True, exist_ok=True)
-    name = Path(rel["asset"]["name"]).name       # never a path from outside
+    # Never a path from outside: only what follows the last slash of either
+    # kind, as Windows reads it, whichever system this runs on.
+    name = re.split(r"[\\/]", rel["asset"]["name"])[-1]
     if not name.lower().endswith(".zip"):
         raise GetError("That release file isn't a zip.")
     dest = into / name

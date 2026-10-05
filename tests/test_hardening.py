@@ -74,7 +74,10 @@ check("a real child is inside",
       palinstall.inside(SB / "Win64" / "ue4ss" / "x.dll", SB / "Win64"))
 # Names aimed at the root of the drive or at C:\Windows are only ever checked
 # as paths, never unpacked: with the guard broken, unpacking would write there.
-for name in ("/abs/escaped.txt", "C:/Windows/escaped.txt"):
+# A drive letter only makes a path absolute on Windows; elsewhere C: is just
+# a folder name, and the path really is inside.
+aimed_out = ["/abs/escaped.txt"] + (["C:/Windows/escaped.txt"] if os.name == "nt" else [])
+for name in aimed_out:
     check(f"{name} is not 'inside' the unpack folder",
           not palinstall.inside(SB / "unpack" / name, SB / "unpack"))
 
