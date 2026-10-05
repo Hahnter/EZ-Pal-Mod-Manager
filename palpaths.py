@@ -354,6 +354,16 @@ def set_game(path, remember=True):
     return True, f"Using {_game}"
 
 
+def install_key(path):
+    """How our own records tell one install from another.
+
+    Everything kept per install (build tracking, save backups, install
+    receipts) is filed under this, so a game and a dedicated server never
+    share one.
+    """
+    return str(Path(path)).lower().rstrip("\\/")
+
+
 def label(path):
     """Short human name for an install: 'Palworld (Steam)', 'Dedicated server'."""
     p = Path(path)
@@ -373,7 +383,7 @@ def known_installs():
     remembered = [Path(i) for i in load_settings().get("installs") or []]
     for path, source in ([(p, "remembered") for p in remembered]
                          + [(h["path"], h["source"]) for h in detect()]):
-        key = str(path).lower().rstrip("\\/")
+        key = install_key(path)
         if key in seen or not validate(path)[0]:
             continue
         seen.add(key)

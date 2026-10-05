@@ -263,7 +263,7 @@ class InstallWindow(tk.Toplevel):
 
         clashes = palinstall.conflicts(plan)
         for c in comps:
-            self._component(c, clashes.get(c["name"], []))
+            self._component(c, clashes.get(palinstall.component_id(c), []))
 
         for w in plan["warnings"]:
             tk.Label(self.body, text="  !  " + w, bg=SURFACE, fg=WARN,
@@ -299,7 +299,9 @@ class InstallWindow(tk.Toplevel):
         top.pack(fill="x", padx=12, pady=(10, 2))
 
         var = tk.BooleanVar(value=True)
-        self.vars[c["name"]] = (var, c)
+        # By kind and name: a hybrid mod's Lua and PalSchema halves often
+        # share a folder name, and each gets its own checkbox.
+        self.vars[palinstall.component_id(c)] = (var, c)
         tk.Checkbutton(top, variable=var, bg=RAISED, fg=TEXT,
                        activebackground=RAISED, activeforeground=TEXT,
                        selectcolor=RAISED, bd=0, highlightthickness=0,
@@ -414,7 +416,7 @@ class InstallWindow(tk.Toplevel):
             return str(dest)
 
     def _install(self):
-        chosen = [c for name, (var, c) in self.vars.items() if var.get()]
+        chosen = [c for var, c in self.vars.values() if var.get()]
         if not chosen:
             messagebox.showinfo("EZ Pal Mod Manager", "Nothing selected.", parent=self)
             return
@@ -846,10 +848,16 @@ class App:
         conflicts, keys, patch = data["conflicts"], data["keybinds"], data["patch"]
         out = []
 
-        def safety_notes(name, on):
-            """(notes, warn, problem) from conflicts, hotkeys and patches."""
+        def safety_notes(name, on, kind):
+            """(notes, warn, problem) from conflicts, hotkeys and patches.
+
+            File conflicts are between paks and hotkeys belong to UE4SS mods,
+            so a row only hears about its own kind, even when a mod of
+            another kind has the same name.
+            """
             notes, warn, problem = [], False, False
-            for idx in conflicts["by_mod"].get(name, []):
+            paks = kind == "pak"
+            for idx in (conflicts["by_mod"].get(name, []) if paks else []):
                 c = conflicts["pairs"][idx]
                 other = c["mods"][1] if c["mods"][0] == name else c["mods"][0]
                 n = c["assets"]
@@ -866,16 +874,16 @@ class App:
                 else:
                     notes.append(f"would clash with {other} over {plural(n, 'file')} "
                                  f"if that is turned on")
-            for what in (on and data.get("core_overrides", {}).get(name)) or []:
+            for what in (on and paks and data.get("core_overrides", {}).get(name)) or []:
                 notes.append(f"replaces {what}, so a game update can stop it "
                              f"loading or crash the game")
                 warn = True
-            if on and name in conflicts["no_patch_suffix"]:
+            if on and paks and name in conflicts["no_patch_suffix"]:
                 notes.append("name doesn't end in _P, so it probably can't "
                              "replace the game's own files")
                 warn = True
             shared = {}
-            for k in keys["by_mod"].get(name, []):
+            for k in (keys["by_mod"].get(name, []) if kind == "ue4ss" else []):
                 if on and k["live"]:
                     for other in k["with"]:
                         shared.setdefault(other, []).append(k["key"])
@@ -923,13 +931,13 @@ class App:
             meta = reg.get(m["name"], {})
             if (age := palregistry.age_note(meta)) and "predate" in age:
                 notes.append(age)
-            extra_notes, warn, problem = safety_notes(m["name"], m["enabled"])
+            extra_notes, warn, problem = safety_notes(m["name"], m["enabled"], "ue4ss")
             notes += extra_notes
             if problem:
                 health = "problem"
             state, colour = after_patch(m["name"], state, colour)
             out.append(dict(
-                warn=warn,
+                warn=warn, id=palregistry.mod_id("ue4ss", m["name"]),
                 group="UE4SS mods", name=m["name"], kind=m["kind"].lower(),
                 where=m.get("location", "?"), extra=m["version"] or "",
                 on=m["enabled"], state=state, colour=colour, health=health,
@@ -960,13 +968,13 @@ class App:
             if p["misplaced"]:
                 notes.insert(0, f"its contents say it belongs in {p['expected_folder']}, "
                                 f"not {p['folder']}")
-            extra_notes, warn, problem = safety_notes(p["name"], not p["disabled"])
+            extra_notes, warn, problem = safety_notes(p["name"], not p["disabled"], "pak")
             notes += extra_notes
             if problem:
                 health = "problem"
             state, colour = after_patch(p["name"], state, colour)
             out.append(dict(
-                warn=warn,
+                warn=warn, id=palregistry.mod_id("pak", p["name"]),
                 group="Pak mods", name=p["name"], kind="pak",
                 where=p["folder"], extra=f"v{p['pak_version']}",
                 on=not p["disabled"], state=state, colour=colour,
@@ -989,7 +997,8 @@ class App:
                 state, colour, health = "on", DIM, "working"
             meta = reg.get(sm["name"], {})
             out.append(dict(
-                warn=False, group="PalSchema mods", name=sm["name"],
+                warn=False, id=palregistry.mod_id("palschema", sm["name"]),
+                group="PalSchema mods", name=sm["name"],
                 kind="palschema", where="PalSchema",
                 extra=", ".join(sm["sections"]), on=sm["enabled"], state=state,
                 colour=colour, health=health,
@@ -1023,7 +1032,7 @@ class App:
         toggles that had been staged but not yet applied.
         """
         self._search_job = None
-        staged = {n: r["toggle"].value for n, r in self.rows.items()
+        staged = {mid: r["toggle"].value for mid, r in self.rows.items()
                   if r["toggle"].value != r["was"]}
 
         for w in self.bodyf.winfo_children():
@@ -1048,7 +1057,7 @@ class App:
             self._order.append(("header", group, self.headers[group]["frame"]))
             for e in g:
                 self._row(e)
-                self._order.append(("row", e["name"], self.rows[e["name"]]["frame"]))
+                self._order.append(("row", e["id"], self.rows[e["id"]]["frame"]))
 
         self.empty = tk.Frame(self.bodyf, bg=SURFACE)
         self.empty_title = tk.Label(self.empty, text="Nothing here.", bg=SURFACE,
@@ -1059,9 +1068,9 @@ class App:
         self.empty_hint.pack(pady=(4, 0))
 
         # Toggles the user had flipped but not applied survive a rebuild.
-        for name, value in staged.items():
-            if name in self.rows:
-                self._set_row(name, value)
+        for mid, value in staged.items():
+            if mid in self.rows:
+                self._set_row(mid, value)
         self._apply_filter()
 
     BANNER = {"bad": ("#2a1b19", "#4d2c27", "#f2b0a7", "error"),
@@ -1248,19 +1257,20 @@ class App:
 
     def _bulk_visible(self, group, value):
         """Stage every visible row of a group on or off."""
-        for name, r in self.rows.items():
+        for mid, r in self.rows.items():
             if r["entry"]["group"] == group and r["frame"].winfo_manager():
-                self._set_row(name, value)
+                self._set_row(mid, value)
         self._recount()
 
-    def _bulk(self, names, value):
-        for n in names:
-            if n in self.rows:
-                self._set_row(n, value)
+    def _bulk(self, ids, value):
+        for mid in ids:
+            if mid in self.rows:
+                self._set_row(mid, value)
         self._recount()
 
-    def _set_row(self, name, value):
-        r = self.rows[name]
+    def _set_row(self, mid, value):
+        """Stage one row on or off. Rows are keyed by mod id ('ue4ss:Name')."""
+        r = self.rows[mid]
         r["toggle"].set(value, pending=value != r["was"])
         r["name_lbl"].config(fg=TEXT if value else DIM)
 
@@ -1276,7 +1286,7 @@ class App:
         inner = tk.Frame(f, bg=base)
         inner.pack(fill="x", padx=22, pady=9)
 
-        tg = Toggle(inner, e["on"], lambda v, n=e["name"]: self._toggled(n, v), base)
+        tg = Toggle(inner, e["on"], lambda v, i=e["id"]: self._toggled(i, v), base)
         tg.pack(side="left", padx=(0, 14))
 
         # Once any mod has a picture, every row gets the slot, so names line up.
@@ -1362,8 +1372,8 @@ class App:
             w.bind("<Enter>", lambda _e: self._hover(plain, custom, True, base), add="+")
             w.bind("<Leave>", lambda _e: self._hover(plain, custom, False, base), add="+")
             w.bind("<Button-3>", lambda ev, en=e: self._row_menu(en, ev), add="+")
-        self.rows[e["name"]] = {"toggle": tg, "was": e["on"], "entry": e,
-                                "name_lbl": name_lbl, "frame": f}
+        self.rows[e["id"]] = {"toggle": tg, "was": e["on"], "entry": e,
+                              "name_lbl": name_lbl, "frame": f}
 
     def _thumb(self, path):
         """A 64x36 row thumbnail, built once per picture."""
@@ -1380,8 +1390,9 @@ class App:
 
     def open_info(self, e):
         # One window per mod: bring an open one forward instead of stacking.
+        # Two kinds of mod with one name get one each; what is on disk differs.
         for w in self.root.winfo_children():
-            if isinstance(w, palinfo.ModInfoWindow) and w.mod == e["name"]:
+            if isinstance(w, palinfo.ModInfoWindow) and w.entry["id"] == e["id"]:
                 w.deiconify()
                 w.lift()
                 w.focus_set()
@@ -1425,7 +1436,8 @@ class App:
             m.add_command(label="Configure…",
                           command=lambda: ConfigWindow(self, e["name"], e["configs"]))
         m.add_command(label="Mod info…", command=lambda: self.open_info(e))
-        keys = self._data["keybinds"]["keys"].get(e["name"])
+        keys = (self._data["keybinds"]["keys"].get(e["name"])
+                if e["group"] == "UE4SS mods" else None)
         if keys:
             m.add_command(label="Hotkeys: " + ", ".join(keys[:6])
                           + ("…" if len(keys) > 6 else ""), state="disabled")
@@ -1554,13 +1566,14 @@ class App:
         m.grab_release()
 
     # ---------------------------------------------------------------- state
-    def _toggled(self, name, value):
-        if name in self.rows:
-            self._set_row(name, value)
+    def _toggled(self, mid, value):
+        if mid in self.rows:
+            self._set_row(mid, value)
         self._recount()
 
     def _pending(self):
-        return [(n, r["toggle"].value) for n, r in self.rows.items()
+        """[(mod id, on)] for every toggle staged but not applied."""
+        return [(mid, r["toggle"].value) for mid, r in self.rows.items()
                 if r["toggle"].value != r["was"]]
 
     def _recount(self):
@@ -1604,9 +1617,10 @@ class App:
         if not changes:
             return
         failed = []
-        for name, on in changes:
+        for mid, on in changes:
+            kind, name = palregistry.split_id(mid)
             try:
-                palmods.set_enabled(name, on)
+                palmods.set_enabled(name, on, kind)
             except OSError as exc:
                 failed.append(f"{name}: {exc}")
         self.reload()
@@ -1734,8 +1748,8 @@ class App:
                        + (f", {problems} need attention" if problems else ""))
 
     def revert(self):
-        for name in self.rows:
-            self._set_row(name, self.rows[name]["was"])
+        for mid, r in self.rows.items():
+            self._set_row(mid, r["was"])
         self._recount()
 
     def install_dialog(self):
@@ -1807,20 +1821,30 @@ class App:
             open_in_explorer(out)
 
     def uninstall(self, e):
-        rec = palregistry.receipt(e["name"])
+        kind, name = palregistry.split_id(e["id"])
+        rec = palregistry.receipt(kind, name)
         detail = (f"{plural(len(rec['files']), 'tracked file')} will be deleted."
                   if rec else
                   "This mod was not installed by the app, so its whole folder "
                   "or .pak will be deleted.")
+        # Pictures, like the page link, belong to every mod of this name and
+        # stay while another is installed: the other half of a hybrid mod, or
+        # the same mod in another install.
+        here = (palpaths.install_key(self._paths["game"]), kind)
+        twins = [x for x in self._entries_cache
+                 if x["name"] == name and x["id"] != e["id"]]
+        shared = bool(twins) or any(r != here for r in palregistry.receipts_for(name))
+        what = f"{name} ({palmods.KIND_LABELS[kind]})" if twins else name
         if not messagebox.askyesno(
                 "Uninstall",
-                f"Remove {e['name']}?\n\n{detail}"
-                + ("\n\nIts pictures go to the Recycle Bin." if e.get("cover") else "")
+                f"Remove {what}?\n\n{detail}"
+                + ("\n\nIts pictures go to the Recycle Bin."
+                   if e.get("cover") and not shared else "")
                 + "\n\nThis cannot be undone."):
             return
         try:
             removed, notes = palinstall.uninstall(
-                e["name"], mod_path=e["path"], pak_path=e["pak_path"])
+                name, mod_path=e["path"], pak_path=e["pak_path"], kind=kind)
         except OSError as exc:
             messagebox.showerror("EZ Pal Mod Manager", str(exc))
             return
@@ -1837,27 +1861,26 @@ class App:
             parent=self.root)
         if not name:
             return
-        on = [e["name"] for e in self._entries_cache if e["on"]]
-        allnames = [e["name"] for e in self._entries_cache]
-        palregistry.save_profile(name, on, allnames)
+        on = [e["id"] for e in self._entries_cache if e["on"]]
+        palregistry.save_profile(name, on, [e["id"] for e in self._entries_cache])
         self.flash(f"Saved profile '{name}' ({len(on)} mods on)")
 
     def load_profile(self, name):
         pr = palregistry.load_profile(name)
         if not pr:
             return
-        want = set(pr["enabled"])
-        known = set(pr["known"])
-        staged, missing = 0, []
+        staged = 0
         for e in self._entries_cache:
-            if e["name"] not in known:
-                continue
-            row = self.rows.get(e["name"])
-            target = e["name"] in want
-            if row and target != row["was"]:
-                self._set_row(e["name"], target)
+            kind, mod = palregistry.split_id(e["id"])
+            target = palregistry.profile_wants(pr, kind, mod)
+            row = self.rows.get(e["id"])
+            if row and target is not None and target != row["was"]:
+                self._set_row(e["id"], target)
                 staged += 1
-        missing = sorted(known - {e["name"] for e in self._entries_cache})
+        # Older profiles list plain names, newer ones mod ids.
+        present = ({e["id"] for e in self._entries_cache}
+                   | {e["name"] for e in self._entries_cache})
+        missing = sorted(set(pr["known"]) - present)
         self._recount()
         msg = f"Profile '{name}': {plural(staged, 'change')} ready. Press Apply changes to use them."
         if missing:

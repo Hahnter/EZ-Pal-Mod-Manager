@@ -197,7 +197,10 @@ class ConflictsWindow(Window):
     def _build(self):
         app, data = self.app, self.app._data
         conflicts, keys = data["conflicts"], data["keybinds"]
-        configs = {e["name"]: e["configs"] for e in app._entries_cache}
+        # Hotkeys are read from UE4SS mods, so only those rows answer for a
+        # name; a pak or PalSchema mod can share it.
+        scripts = [e for e in app._entries_cache if e["group"] == "UE4SS mods"]
+        configs = {e["name"]: e["configs"] for e in scripts}
 
         pairs = sorted(conflicts["pairs"], key=lambda c: not c["live"])
         self.section("Mods replacing the same game files", len(pairs))
@@ -262,7 +265,7 @@ class ConflictsWindow(Window):
                       pady=(8, 4))
 
         self.section("Hotkeys by mod")
-        on = {e["name"] for e in app._entries_cache if e["on"]}
+        on = {e["name"] for e in scripts if e["on"]}
         for name, ks in sorted(keys["keys"].items()):
             row = tk.Frame(self.body, bg=SURFACE)
             row.pack(fill="x", padx=22, pady=1)
@@ -834,15 +837,14 @@ class CompareWindow(Window):
 
     def _stage(self):
         app, r = self.app, self.result
+        # A shared modlist names mods, like the registry does, so every mod
+        # of a name follows it: both halves of a hybrid mod together.
         staged = 0
-        for name in r["turn_on"]:
-            if name in app.rows:
-                app._set_row(name, True)
-                staged += 1
-        for name in r["turn_off"]:
-            if name in app.rows:
-                app._set_row(name, False)
-                staged += 1
+        for names, value in ((r["turn_on"], True), (r["turn_off"], False)):
+            for mid, row in app.rows.items():
+                if row["entry"]["name"] in names:
+                    app._set_row(mid, value)
+                    staged += row["was"] != value
         app._recount()
         app.status.config(text=f"{plural(staged, 'change')} ready to match their setup. "
                                f"Press Apply changes to use them.", fg=TEXT)

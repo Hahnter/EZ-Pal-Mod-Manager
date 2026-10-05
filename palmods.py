@@ -10,6 +10,9 @@ loaded, and reports what is working, what failed, and what is in the wrong folde
     python palmods.py enable  <name>      stage a mod on  (applies next launch)
     python palmods.py disable <name>      stage a mod off (applies next launch)
 
+A name that two kinds of mod share, such as the Lua and PalSchema halves of a
+hybrid mod, is given with its kind: ue4ss:<name>, pak:<name>, palschema:<name>.
+
 Writes manifest.json on every run; the in-game panel (stage 2) reads that file,
 because UE4SS Lua has io.open but no directory listing.
 """
@@ -403,6 +406,10 @@ BUILTIN = {
 
 MODS_TXT_LINE = re.compile(r"^(\s*)([\w.-]+)(\s*:\s*)([01])(.*)$")
 
+# A real mod folder always carries one of these.
+UE4SS_SIGNS = ("enabled.txt", "enabled.txt.disabled", "Scripts/main.lua",
+               "dlls/main.dll")
+
 
 def read_mod_lists(mods_dir):
     """{'mods.txt': {name: on}, 'mods.json': {name: on}} -- either may be empty.
@@ -471,10 +478,7 @@ def scan_ue4ss(paths, log):
         for d in sorted(rootdir.iterdir()):
             if not d.is_dir() or d.name == "shared":
                 continue
-            # A real mod folder always carries one of these.
-            if not any((d / s).exists() for s in
-                       ("enabled.txt", "enabled.txt.disabled",
-                        "Scripts/main.lua", "dlls/main.dll")):
+            if not any((d / s).exists() for s in UE4SS_SIGNS):
                 continue
             if d.name in seen:
                 seen[d.name]["also_in"].append(label)
@@ -598,60 +602,112 @@ def age_note(entry):
 # --------------------------------------------------------------------------
 # toggling
 # --------------------------------------------------------------------------
-def set_enabled(name, on):
-    """Toggle a mod wherever it lives -- any UE4SS root or any pak folder."""
-    paths = discover()
+KIND_LABELS = {"ue4ss": "UE4SS mod", "pak": "pak", "palschema": "PalSchema mod"}
 
+
+def _ue4ss_folder(paths, name):
+    """(Mods folder, mod folder) for the UE4SS mod called `name`, or None."""
     for _, rootdir in paths["mod_roots"]:
         d = rootdir / name
-        if not d.is_dir():
-            continue
-        live, off = d / "enabled.txt", d / "enabled.txt.disabled"
-        if on:
-            if off.is_file() and not live.is_file():
-                off.rename(live)
-            elif not live.is_file():
-                live.write_text("")
-        elif live.is_file():
-            live.replace(off)
+        if d.is_dir() and any((d / s).exists() for s in UE4SS_SIGNS):
+            return rootdir, d
+    return None
 
-        # Update both mod lists, whichever this UE4SS build reads, so they
-        # can't drift apart and turn a switched-off mod back on.
-        js = rootdir / "mods.json"
-        if js.is_file():
-            try:
-                data = json.loads(js.read_text("utf8"))
-                for e in data:
-                    if e.get("mod_name") == name:
-                        e["mod_enabled"] = on
-                        js.write_text(json.dumps(data, indent=4) + "\n", "utf8")
-                        break
-            except ValueError:
-                pass
-        txt = rootdir / "mods.txt"
-        if txt.is_file():
-            # Read bytes: read_text would turn the file's CRLF endings into LF.
-            lines = txt.read_bytes().decode("utf8", "replace").splitlines(keepends=True)
-            for i, ln in enumerate(lines):
-                body = ln.rstrip("\r\n")
-                m = MODS_TXT_LINE.match(body)
-                if m and m.group(2) == name and not body.lstrip().startswith(";"):
-                    lines[i] = (f"{m.group(1)}{name}{m.group(3)}{int(on)}{m.group(5)}"
-                                + ln[len(body):])
-                    txt.write_text("".join(lines), "utf8", newline="")
+
+def _pak_files(paths, name):
+    """The pak called `name`, on or off, in every folder paks are read from."""
+    return [p for _, folder in paths["pak_roots"]
+            for p in (folder / f"{name}.pak", folder / f"{name}.pak.disabled")
+            if p.is_file()]
+
+
+def _plain_name(name):
+    """A mod's name is one folder or file name. A path or an empty name would
+    reach past the mod folders: '' is the PalSchema mods folder itself."""
+    return bool(name) and name not in (".", "..") and not any(c in name for c in "\\/:")
+
+
+def kinds_of(name, paths=None):
+    """Every kind of mod called `name` in this install, in KINDS order."""
+    if not _plain_name(name):
+        return []
+    paths = paths or discover()
+    _, on_dir, off_dir = palschema_dirs(paths)
+    found = {"ue4ss": _ue4ss_folder(paths, name) is not None,
+             "pak": bool(_pak_files(paths, name)),
+             "palschema": (on_dir / name).is_dir() or (off_dir / name).is_dir()}
+    return [k for k in palregistry.KINDS if found[k]]
+
+
+def _either(words):
+    return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " or " + words[-1]
+
+
+def describe_kinds(kinds):
+    """'both a UE4SS mod and a PalSchema mod', for the kinds sharing a name."""
+    bits = [f"a {KIND_LABELS[k]}" for k in kinds]
+    if len(bits) == 2:
+        return f"both {bits[0]} and {bits[1]}"
+    return bits[0] if len(bits) == 1 else ", ".join(bits[:-1]) + " and " + bits[-1]
+
+
+def _toggle_ue4ss(paths, name, on):
+    found = _ue4ss_folder(paths, name)
+    if found is None:
+        return None
+    rootdir, d = found
+    live, off = d / "enabled.txt", d / "enabled.txt.disabled"
+    if on:
+        if off.is_file() and not live.is_file():
+            off.rename(live)
+        elif not live.is_file():
+            live.write_text("")
+    elif live.is_file():
+        live.replace(off)
+
+    # Update both mod lists, whichever this UE4SS build reads, so they
+    # can't drift apart and turn a switched-off mod back on.
+    js = rootdir / "mods.json"
+    if js.is_file():
+        try:
+            data = json.loads(js.read_text("utf8"))
+            for e in data:
+                if e.get("mod_name") == name:
+                    e["mod_enabled"] = on
+                    js.write_text(json.dumps(data, indent=4) + "\n", "utf8")
                     break
-        return f"UE4SS mod '{name}' -> {'enabled' if on else 'disabled'} (applies next launch)"
+        except ValueError:
+            pass
+    txt = rootdir / "mods.txt"
+    if txt.is_file():
+        # Read bytes: read_text would turn the file's CRLF endings into LF.
+        lines = txt.read_bytes().decode("utf8", "replace").splitlines(keepends=True)
+        for i, ln in enumerate(lines):
+            body = ln.rstrip("\r\n")
+            m = MODS_TXT_LINE.match(body)
+            if m and m.group(2) == name and not body.lstrip().startswith(";"):
+                lines[i] = (f"{m.group(1)}{name}{m.group(3)}{int(on)}{m.group(5)}"
+                            + ln[len(body):])
+                txt.write_text("".join(lines), "utf8", newline="")
+                break
+    return f"UE4SS mod '{name}' -> {'enabled' if on else 'disabled'} (applies next launch)"
 
+
+def _toggle_pak(paths, name, on):
     for _, folder in paths["pak_roots"]:
-        for p in sorted(folder.glob(f"{name}.pak*")):
-            if on and p.name.endswith(".pak.disabled"):
-                p.rename(Path(str(p)[:-len(".disabled")]))
-                return f"pak '{name}' -> enabled (applies next launch)"
-            if not on and p.name.endswith(".pak"):
-                p.rename(Path(str(p) + ".disabled"))
-                return f"pak '{name}' -> disabled (applies next launch)"
+        live, off = folder / f"{name}.pak", folder / f"{name}.pak.disabled"
+        if on and off.is_file() and not live.exists():
+            off.rename(live)
+            return f"pak '{name}' -> enabled (applies next launch)"
+        if not on and live.is_file():
+            live.rename(off)
+            return f"pak '{name}' -> disabled (applies next launch)"
+        if live.is_file() or off.is_file():
             return f"pak '{name}' already {'enabled' if on else 'disabled'}"
+    return None
 
+
+def _toggle_palschema(paths, name, on):
     _, on_dir, off_dir = palschema_dirs(paths)
     src, dst = ((off_dir / name, on_dir / name) if on
                 else (on_dir / name, off_dir / name))
@@ -664,7 +720,36 @@ def set_enabled(name, on):
                 f"(applies next launch)")
     if dst.is_dir():
         return f"PalSchema mod '{name}' already {'enabled' if on else 'disabled'}"
-    return f"No mod named '{name}' found."
+    return None
+
+
+TOGGLES = {"ue4ss": _toggle_ue4ss, "pak": _toggle_pak, "palschema": _toggle_palschema}
+
+
+def set_enabled(name, on, kind=None):
+    """Toggle a mod wherever it lives: any UE4SS root, pak folder or PalSchema.
+
+    One name can belong to two kinds of mod: a hybrid mod often ships a Lua mod
+    and a PalSchema mod in folders of the same name. `kind` ("ue4ss", "pak" or
+    "palschema") says which one is meant. Without it, a shared name is refused
+    instead of guessed at, because a guess switches off the wrong half.
+    """
+    if kind is not None and kind not in TOGGLES:
+        raise ValueError(f"unknown kind of mod: {kind!r}")
+    if not _plain_name(name):
+        return f"No mod named '{name}' found."
+    paths = discover()
+    if kind is None:
+        found = kinds_of(name, paths)
+        if not found:
+            return f"No mod named '{name}' found."
+        if len(found) > 1:
+            return (f"Nothing was changed: '{name}' is {describe_kinds(found)}. "
+                    f"Say which: "
+                    + _either([palregistry.mod_id(k, name) for k in found]) + ".")
+        kind = found[0]
+    return (TOGGLES[kind](paths, name, on)
+            or f"No {KIND_LABELS[kind]} named '{name}' found.")
 
 
 # --------------------------------------------------------------------------
@@ -1222,9 +1307,16 @@ def cmd_install(args):
                   f"-> {c['dest']}")
         for w in plan["warnings"]:
             print(f"  ! {w}")
-        for name, files in palinstall.conflicts(plan).items():
-            print(f"  ! {name} overwrites {len(files)} existing file(s) "
-                  f"(backups kept as .pmm-bak)")
+        clashes = palinstall.conflicts(plan)
+        names = [c["name"] for c in plan["components"]]
+        for c in plan["components"]:
+            files = clashes.get(palinstall.component_id(c))
+            if files:
+                # Say which half of a hybrid mod, when both share the name.
+                label = (c["name"] if names.count(c["name"]) == 1
+                         else f"{c['name']} ({c['kind']})")
+                print(f"  ! {label} overwrites {len(files)} existing file(s) "
+                      f"(backups kept as .pmm-bak)")
         if not args.yes:
             if input("\nInstall? [y/N] ").strip().lower() not in ("y", "yes"):
                 print("Cancelled.")
@@ -1237,12 +1329,39 @@ def cmd_install(args):
         palinstall.discard(plan)
 
 
+def _say_which(verb, name, kinds):
+    """Explain a name that two kinds of mod share, with the commands to pick one."""
+    print(f"'{name}' is {describe_kinds(kinds)}. Say which:")
+    for k in kinds:
+        print(f"  palmods.py {verb} {palregistry.mod_id(k, name)}")
+
+
+def cmd_toggle(args):
+    """enable / disable <name>, or <kind>:<name> for a name two mods share."""
+    kind, name = palregistry.split_id(args.name)
+    if kind is None and len(found := kinds_of(name)) > 1:
+        _say_which(args.cmd, name, found)
+        return 1
+    print(set_enabled(name, args.cmd == "enable", kind))
+    return 0
+
+
 def cmd_uninstall(args):
     import palinstall
+    kind, name = palregistry.split_id(args.name)
     data = build(discover())
-    mod = next((m for m in data["ue4ss_mods"] if m["name"] == args.name), None)
-    pak = next((p for p in data["pak_mods"] if p["name"] == args.name), None)
-    if not mod and not pak and not palregistry.receipt(args.name):
+    # Where each kind of mod by this name is, for one that has no receipt.
+    where = {"ue4ss": [m["path"] for m in data["ue4ss_mods"] if m["name"] == name],
+             "pak": [p["path"] for p in data["pak_mods"] if p["name"] == name],
+             "palschema": [s["path"] for s in data["palschema_mods"]
+                           if s["name"] == name]}
+    have = [k for k in palregistry.KINDS
+            if where[k] or palregistry.receipt(k, name)]
+    if kind is None and len(have) > 1:
+        _say_which("uninstall", name, have)
+        return 1
+    kind = kind or (have[0] if have else None)
+    if kind not in have:
         print(f"No mod named '{args.name}'.")
         return 1
     if not args.yes:
@@ -1250,9 +1369,10 @@ def cmd_uninstall(args):
         if ans not in ("y", "yes"):
             print("Cancelled.")
             return 1
+    path = where[kind][0] if where[kind] else None
     removed, notes = palinstall.uninstall(
-        args.name, mod_path=mod["path"] if mod else None,
-        pak_path=pak["path"] if pak else None)
+        name, kind=kind, mod_path=path if kind != "pak" else None,
+        pak_path=path if kind == "pak" else None)
     for n in notes:
         print(f"  ! {n}")
     print(f"Removed {len(removed)} file(s).")
@@ -1290,11 +1410,12 @@ def cmd_source(args):
 
 def cmd_profile(args):
     data = build(discover())
-    names = ([m["name"] for m in data["ue4ss_mods"] if not m["builtin"]]
-             + [p["name"] for p in data["pak_mods"]])
-    on = ([m["name"] for m in data["ue4ss_mods"]
-           if not m["builtin"] and m["enabled"]]
-          + [p["name"] for p in data["pak_mods"] if not p["disabled"]])
+    mods = ([("ue4ss", m["name"], m["enabled"]) for m in data["ue4ss_mods"]
+             if not m["builtin"]]
+            + [("pak", p["name"], not p["disabled"]) for p in data["pak_mods"]]
+            + [("palschema", s["name"], s["enabled"]) for s in data["palschema_mods"]])
+    ids = [palregistry.mod_id(k, n) for k, n, _ in mods]
+    on = [palregistry.mod_id(k, n) for k, n, enabled in mods if enabled]
 
     if args.action == "list":
         saved = palregistry.profile_names()
@@ -1310,7 +1431,7 @@ def cmd_profile(args):
         return 1
 
     if args.action == "save":
-        palregistry.save_profile(args.name, on, names)
+        palregistry.save_profile(args.name, on, ids)
         print(f"Saved profile '{args.name}' ({len(on)} mods on).")
         return 0
     if args.action == "load":
@@ -1318,10 +1439,11 @@ def cmd_profile(args):
         if not pr:
             print(f"No profile named '{args.name}'.")
             return 1
-        want, changed = set(pr["enabled"]), 0
-        for n in names:
-            if n in pr["known"] and (n in want) != (n in on):
-                set_enabled(n, n in want)
+        changed = 0
+        for kind, n, enabled in mods:
+            want = palregistry.profile_wants(pr, kind, n)
+            if want is not None and want != enabled:
+                set_enabled(n, want, kind)
                 changed += 1
         print(f"Applied '{args.name}': {changed} change(s). "
               f"Restart Palworld to take effect.")
@@ -1350,8 +1472,10 @@ def main():
     s.add_argument("--html", action="store_true", help="also write dashboard.html")
     d = sub.add_parser("doctor", help="detect a conflicting second UE4SS install")
     d.add_argument("--fix", action="store_true", help="repair what it finds")
+    name_help = ("the mod's name, or kind:name when two kinds of mod share it "
+                 "(ue4ss:, pak: or palschema:)")
     for verb in ("enable", "disable"):
-        sub.add_parser(verb, help=f"{verb} a mod").add_argument("name")
+        sub.add_parser(verb, help=f"{verb} a mod").add_argument("name", help=name_help)
 
     pa = sub.add_parser("path", help="show or set the Palworld folder")
     pa.add_argument("--set", metavar="FOLDER", help="use this install")
@@ -1364,7 +1488,7 @@ def main():
                      help="the Nexus/CurseForge page it was downloaded from")
 
     un = sub.add_parser("uninstall", help="delete a mod from disk")
-    un.add_argument("name")
+    un.add_argument("name", help=name_help)
     un.add_argument("-y", "--yes", action="store_true", help="do not ask")
 
     nw = sub.add_parser("new", help="scaffold a mod of your own")
@@ -1397,16 +1521,13 @@ def main():
     handlers = {"path": cmd_path, "install": cmd_install,
                 "uninstall": cmd_uninstall, "new": cmd_new,
                 "source": cmd_source, "profile": cmd_profile,
-                "check": cmd_check, "backup": cmd_backup, "export": cmd_export}
+                "check": cmd_check, "backup": cmd_backup, "export": cmd_export,
+                "enable": cmd_toggle, "disable": cmd_toggle}
     if args.cmd in handlers:
         try:
             sys.exit(handlers[args.cmd](args))
         except (FileNotFoundError, OSError, RuntimeError) as exc:
             sys.exit(str(exc))
-
-    if args.cmd in ("enable", "disable"):
-        print(set_enabled(args.name, args.cmd == "enable"))
-        return
 
     if args.cmd == "doctor":
         issues, actions = doctor(args.fix)

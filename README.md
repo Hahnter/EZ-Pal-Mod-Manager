@@ -105,8 +105,10 @@ what each mod shipped, so it can tell your edits from the mod's own defaults.
 A file you never touched is just replaced.
 
 **Uninstalls cleanly.** Every file an install writes is recorded, so removal
-takes exactly those files and nothing else. Mods installed before this app fall
-back to deleting their own folder or pak, and it tells you that first.
+takes exactly those files and nothing else. Each install keeps its own record:
+removing a mod from the game leaves a dedicated server's copy alone. Mods
+installed before this app fall back to deleting their own folder or pak, and it
+tells you that first.
 
 **Makes mods.** *New mod* scaffolds a working UE4SS Lua mod, switched on and
 ready to edit. *Package for sharing* zips it laid out to extract into any
@@ -210,6 +212,10 @@ All under **…**:
 is switched off by moving its folder from `PalSchema\mods` to
 `PalSchema\disabled-mods`, where PalSchema doesn't look.
 
+A hybrid mod often ships a Lua mod and a PalSchema mod under one name. Each half
+gets its own row and switch. Both halves share one page link, description and
+set of pictures.
+
 ## Reading the list
 
 | State | Means |
@@ -252,6 +258,7 @@ python palmods.py install <zip> --link URL  # ...and link it to its mod page
 python palmods.py uninstall <name>          # remove a mod
 python palmods.py enable  <name>            # toggle
 python palmods.py disable <name>
+python palmods.py disable palschema:<name>  # one half of a hybrid mod
 python palmods.py new <name>                # scaffold a mod of your own
 python palmods.py path --detect             # list every install found
 python palmods.py path --set <folder>       # point at one
@@ -262,6 +269,10 @@ python palmods.py check                     # UE4SS, updates, conflicts, hotkeys
 python palmods.py backup create             # back up saves; also: list, restore <id>
 python palmods.py export --text             # your modlist, ready to paste
 ```
+
+A plain name is enough unless two kinds of mod share it. Then `enable`,
+`disable` and `uninstall` change nothing and print the commands that pick each
+one, using `ue4ss:<name>`, `pak:<name>` or `palschema:<name>`.
 
 ## Doctor
 
@@ -284,7 +295,7 @@ Everything this tool generates lives in `%LOCALAPPDATA%\PalModManager`:
 |---|---|
 | `settings.json` | Game folder and preferences |
 | `registry.json` | Per-mod source, id, version, notes |
-| `receipts.json` | What each install wrote, for clean removal |
+| `receipts.json` | What each install wrote, for clean removal, kept per game folder |
 | `profiles.json` | Saved sets of enabled mods |
 | `manifest.json` | Regenerated each scan; the in-game panel reads this |
 | `state.json` | Which build each mod last loaded on, per install |
