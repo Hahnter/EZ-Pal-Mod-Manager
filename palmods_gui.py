@@ -34,6 +34,8 @@ import palpaths
 import palregistry
 import palsafety
 import palwindows
+import palworkshop
+from paltext import and_list
 
 from palui import (open_link, BG, SURFACE, RAISED, HOVER, LINE, TEXT, DIM, FAINT, ACCENT, GOOD, WARN, BAD, PEND,
                    ON_ACCENT, ACCENT_HI, PROBLEM_BG, TITLE_FONT, BODY_FONT, STRONG_FONT,
@@ -873,7 +875,7 @@ class App:
                         notes.append(f"overrides {plural(n, 'file')} also in {other}")
                         warn = True
                     else:
-                        notes.append(f"{other} overrides {n} of its {'file' if n == 1 else 'files'}"
+                        notes.append(f"{other} overrides {n} of its files"
                                      + ("" if c["sure"] else " (likely)"))
                         problem = True
                 else:
@@ -888,7 +890,8 @@ class App:
                              "replace the game's own files")
                 warn = True
             shared = {}
-            for k in (keys["by_mod"].get(name, []) if kind == "ue4ss" else []):
+            scripts = kind in ("ue4ss", "workshop")
+            for k in (keys["by_mod"].get(name, []) if scripts else []):
                 if on and k["live"]:
                     for other in k["with"]:
                         shared.setdefault(other, []).append(k["key"])
@@ -1018,10 +1021,84 @@ class App:
                 source=palregistry.describe_source(sm["name"], meta),
                 url=palregistry.url_for(sm["name"], meta),
                 mine=meta.get("source") == "local"))
+        server = data["install"]["kind"] == "server"
+        for w in data.get("workshop_mods", []):
+            mid = palregistry.mod_id("workshop", w["name"])
+            live = w["enabled"] and w["applies"] and not w["error"]
+            notes, warn = [], False
+            if w["error"]:
+                state, colour, health = "can't read", BAD, "problem"
+                notes.append(f"Workshop item {w['item']}: {w['error']}")
+            elif not w["listed"]:
+                state, colour, health = "off", FAINT, "off"
+            elif not w["enabled"]:
+                # Every mod is off in the game's own menu; a banner says so.
+                state, colour, health = "mods off in game", WARN, "off"
+            elif not w["applies"]:
+                state = ("nothing to install" if not w["for_other"]
+                         else "for the game only" if server else "for servers only")
+                colour, health = DIM, "off"
+            elif w["failures"]:
+                state, colour, health = "error", BAD, "problem"
+            elif w["needs"]:
+                state, colour, health = "can't start", BAD, "problem"
+            elif w["loaded"]:
+                state, colour, health = "working", GOOD, "working"
+            elif mid in waiting:
+                state, colour, health = "starts next launch", DIM, "working"
+            elif w["deps_missing"] or w["deps_off"]:
+                state, colour, health = "needs another mod", BAD, "problem"
+            elif w["loggable"]:
+                state, colour, health = "didn't start", WARN, "problem"
+            else:
+                # Paks and PalSchema mods don't announce themselves.
+                state, colour, health = "on", DIM, "working"
+            if live:
+                notes += w["failures"]
+                if w["needs"]:
+                    notes.append(w["needs"])
+                missing = w["deps_missing"]
+                if missing:
+                    notes.append(f"needs {and_list(missing)}, which "
+                                 f"{'isn' if len(missing) == 1 else 'aren'}'t "
+                                 f"subscribed")
+                if w["deps_off"]:
+                    notes.append(f"needs {and_list(w['deps_off'])} switched on")
+            if w["duplicate"] and w["listed"]:
+                others = w["duplicate"]
+                notes.append(f"{and_list(others)} {'has' if len(others) == 1 else 'have'} "
+                             f"the same package name, and the game loads only "
+                             f"one of them")
+                warn = True
+            if not w["enabled"] and w["loaded"] and not w["error"]:
+                notes.append("was loaded last session; off from the next launch")
+            if not w["switchable"] and not w["error"]:
+                notes.append(f"switched in {palworkshop.menu(server)}")
+            # Its paks clash like any other's; its scripts bind keys.
+            for pak in w["paks"]:
+                more, wn, pr = safety_notes(pak, live, "pak")
+                notes += more
+                warn, health = warn or wn, "problem" if pr else health
+            more, wn, pr = safety_notes(w["name"], live, "workshop")
+            notes += more
+            warn, health = warn or wn, "problem" if pr else health
+            state, colour = after_patch(w["name"], state, colour)
+            out.append(dict(
+                warn=warn, id=mid, group="Workshop mods", name=w["name"],
+                label=w["title"], kind="workshop", where="Steam Workshop",
+                extra=w["version"], on=w["listed"], state=state, colour=colour,
+                health=health, note="; ".join(notes), path=w["path"],
+                pak_path=None, configs=[], source="Steam Workshop", url=w["url"],
+                mine=False, workshop=w,
+                # The game's menu is the only safe way to switch these.
+                locked=bool(w["error"]) or not w["switchable"]))
+
         for e in out:
             meta = reg.get(e["name"], {})
             e["cover"] = palmedia.cover_path(e["name"], meta)
-            e["search"] = " ".join((e["name"], e["source"],
+            if not e["cover"] and (e.get("workshop") or {}).get("thumbnail"):
+                e["cover"] = Path(e["workshop"]["thumbnail"])
+            e["search"] = " ".join((e["name"], e.get("label") or "", e["source"],
                                     (meta.get("description") or "")[:4000])).lower()
         return out
 
@@ -1059,7 +1136,7 @@ class App:
 
         self._any_cover = any(e.get("cover") for e in self._entries_cache)
         self._order = []
-        for group in ("UE4SS mods", "Pak mods", "PalSchema mods"):
+        for group in ("UE4SS mods", "Pak mods", "PalSchema mods", "Workshop mods"):
             g = [e for e in self._entries_cache if e["group"] == group]
             if not g:
                 continue
@@ -1118,15 +1195,23 @@ class App:
                         "can interfere with mods. Repair tidies it away.")
             self._banner(text, "bad", [("Repair", self.repair)])
 
-        if ue["state"] != "ok" and not (ue["state"] == "conflict" and self._issues):
+        # Repair's banner covers two copies in Win64, not one there and one
+        # from the Steam Workshop: that one always gets its own.
+        if ue["state"] != "ok" and not (ue["state"] == "conflict" and self._issues
+                                        and not ue.get("twice")):
             more = len(ue["problems"]) - 1
             text = ue["problems"][0] + (f"  (+{more} more)" if more > 0 else "")
             kind = "bad" if ue["state"] in ("missing", "broken", "conflict") else "warn"
             actions = [("Details", self._ue4ss_details)]
             # Missing, half-installed, or the flat build that current Palworld
-            # mods don't load under: all fixed by fetching the right one.
-            if ue["state"] in ("missing", "broken") or ue["layout"] == "flat":
+            # mods don't load under: all fixed by fetching the right one --
+            # unless UE4SS here comes, or needs to come, from the Workshop.
+            workshop = ue["layout"] == "workshop" or ue.get("from_workshop")
+            if (ue["state"] in ("missing", "broken") or ue["layout"] == "flat") \
+                    and not workshop:
                 actions.insert(0, ("Install UE4SS", self.get_ue4ss))
+            if ue["layout"] == "workshop" and ue["workshop"] == palworkshop.MODS_OFF:
+                actions.insert(0, ("Switch on", self.workshop_mods_on))
             self._banner(text, kind, actions)
 
         # PalSchema mods are inert without the framework they patch through.
@@ -1139,6 +1224,28 @@ class App:
                 f"isn't installed: {', '.join(orphans[:3])}"
                 + (" and more." if len(orphans) > 3 else "."),
                 "bad", [("Install PalSchema", self.get_palschema)])
+
+        # Palworld's own switch for every mod, kept in its Mod Management.
+        # With the Workshop's UE4SS, the banner above says it already.
+        wsd = data.get("workshop") or {}
+        listed = [w["title"] for w in data.get("workshop_mods", [])
+                  if w["listed"] and not w["error"]]
+        if listed and not wsd.get("global_on") and ue["layout"] != "workshop":
+            self._banner(
+                f"Mods are switched off in {palworkshop.menu(wsd.get('server'))}, "
+                f"so these Steam Workshop mods won't load: {', '.join(listed[:3])}"
+                + (" and more." if len(listed) > 3 else "."),
+                "info", [("Switch on", self.workshop_mods_on)])
+        # A dedicated server is told where its Workshop mods are, by hand.
+        if wsd.get("server") and wsd.get("active") and not wsd.get("root"):
+            text = ("This server's mod list names Steam Workshop mods, but "
+                    "Mods\\PalModSettings.ini doesn't say which folder they're "
+                    "in (WorkshopRootDir), so none of them load."
+                    if not wsd.get("root_set") else
+                    f"The Workshop folder this server's Mods\\PalModSettings.ini "
+                    f"names ({wsd['root_set']}) isn't there, so none of its "
+                    f"Steam Workshop mods load.")
+            self._banner(text, "bad", [("Choose folder…", self.workshop_folder)])
 
         patch = data["patch"]
         if patch["updated"]:
@@ -1167,6 +1274,56 @@ class App:
                             f"({', '.join(c['key'] for c in clashes[:3])})")
             self._banner(" · ".join(bits) + ".", "warn",
                          [("Review", self.open_conflicts)])
+
+    def _game_closed(self):
+        """Palworld keeps its own mod settings while it runs."""
+        if not palsafety.game_running(self._paths["game"]):
+            return True
+        messagebox.showinfo("EZ Pal Mod Manager",
+                            "Close Palworld first: it keeps its own Workshop mod "
+                            "settings while it runs, and may save them over this "
+                            "change when it exits.")
+        return False
+
+    def workshop_mods_on(self):
+        """Palworld's own switch for every mod, as its Mod Management sets it."""
+        if not self._paths or not self._game_closed():
+            return
+        try:
+            palworkshop.set_global(self._paths["game"], True)
+        except OSError as exc:
+            messagebox.showerror("EZ Pal Mod Manager", str(exc))
+            return
+        self.reload()
+        self.flash("Mods switched on in Palworld's Mod Management. They load "
+                   "the next time you play.")
+
+    def workshop_folder(self):
+        """Tell a dedicated server where its Workshop mods are."""
+        if not self._paths or not self._game_closed():
+            return
+        folder = filedialog.askdirectory(
+            title="Choose the folder holding the Workshop mods "
+                  "(…\\workshop\\content\\1623730)")
+        if not folder:
+            return
+        try:
+            has = any((d / "Info.json").is_file() for d in Path(folder).iterdir()
+                      if d.is_dir())
+        except OSError:
+            has = False
+        if not has and not messagebox.askyesno(
+                "EZ Pal Mod Manager", "There are no Workshop mods in that folder: "
+                "none of its folders has an Info.json. Use it anyway?"):
+            return
+        try:
+            palworkshop.set_root(self._paths["game"], folder)
+        except OSError as exc:
+            messagebox.showerror("EZ Pal Mod Manager", str(exc))
+            return
+        self.reload(full=True)
+        self.flash("Saved where this server's Workshop mods are. They load the "
+                   "next time it starts.")
 
     def _ue4ss_details(self):
         ue = self._data["ue4ss"]
@@ -1250,7 +1407,8 @@ class App:
 
     # Group keys stay as they are internally; these are what people read.
     GROUP_TITLES = {"UE4SS mods": "Script mods (UE4SS)", "Pak mods": "Pak mods",
-                    "PalSchema mods": "PalSchema mods"}
+                    "PalSchema mods": "PalSchema mods",
+                    "Workshop mods": "Steam Workshop mods"}
 
     def _header(self, title, group):
         h = tk.Frame(self.bodyf, bg=SURFACE)
@@ -1283,13 +1441,17 @@ class App:
     def _set_row(self, mid, value):
         """Stage one row on or off. Rows are keyed by mod id ('ue4ss:Name')."""
         r = self.rows[mid]
+        if r["entry"].get("locked"):
+            return
         r["toggle"].set(value, pending=value != r["was"])
         r["name_lbl"].config(fg=TEXT if value else DIM)
 
     STATE_ICONS = {"working": "check", "didn't start": "alert", "error": "error",
                    "wrong folder": "alert", "worked before update": "clock",
                    "on": "dot", "needs PalSchema": "alert", "PalSchema off": "alert",
-                   "starts next launch": "play"}
+                   "starts next launch": "play", "can't start": "alert",
+                   "needs another mod": "alert", "can't read": "error",
+                   "mods off in game": "alert"}
 
     def _row(self, e):
         base = PROBLEM_BG if e["health"] == "problem" else SURFACE
@@ -1301,6 +1463,9 @@ class App:
 
         tg = Toggle(inner, e["on"], lambda v, i=e["id"]: self._toggled(i, v), base)
         tg.pack(side="left", padx=(0, 14))
+        if e.get("locked"):
+            tg.unbind("<Button-1>")
+            tg.config(cursor="arrow")
 
         # Once any mod has a picture, every row gets the slot, so names line up.
         if self._any_cover:
@@ -1335,7 +1500,8 @@ class App:
 
         col = tk.Frame(inner, bg=base)
         col.pack(side="left", fill="x", expand=True)
-        name_lbl = tk.Label(col, text=e["name"], bg=base, fg=TEXT if e["on"] else DIM,
+        name_lbl = tk.Label(col, text=e.get("label") or e["name"], bg=base,
+                            fg=TEXT if e["on"] else DIM,
                             font=self.f_name, anchor="w", cursor="hand2")
         name_lbl.pack(fill="x")
         name_lbl.bind("<Button-1>", lambda _e, ev=e: self.open_info(ev))
@@ -1355,7 +1521,8 @@ class App:
             meta_bits.append(tk.Label(meta_line, text="Your mod", bg=base, fg=DIM,
                                       font=self.f_small))
         version = (self._data["registry"].get(e["name"], {}).get("version")
-                   or (e["extra"] if e["group"] == "UE4SS mods" else None))
+                   or (e["extra"] if e["group"] in ("UE4SS mods", "Workshop mods")
+                       else None))
         if version:
             meta_bits.append(tk.Label(meta_line, text=f"v{version}", bg=base, fg=FAINT,
                                       font=self.f_small))
@@ -1443,14 +1610,15 @@ class App:
             m.add_command(label="Open folder",
                           command=lambda: open_in_explorer(target))
         if e["url"]:
-            m.add_command(label="Open mod page",
+            m.add_command(label="Open Workshop page" if e["group"] == "Workshop mods"
+                          else "Open mod page",
                           command=lambda: open_link(e["url"]))
         if e["configs"]:
             m.add_command(label="Configure…",
                           command=lambda: ConfigWindow(self, e["name"], e["configs"]))
         m.add_command(label="Mod info…", command=lambda: self.open_info(e))
         keys = (self._data["keybinds"]["keys"].get(e["name"])
-                if e["group"] == "UE4SS mods" else None)
+                if e["group"] in ("UE4SS mods", "Workshop mods") else None)
         if keys:
             m.add_command(label="Hotkeys: " + ", ".join(keys[:6])
                           + ("…" if len(keys) > 6 else ""), state="disabled")
@@ -1460,8 +1628,11 @@ class App:
             m.add_separator()
             m.add_command(label="Package for sharing…",
                           command=lambda: self.package_mod(e))
-        m.add_separator()
-        m.add_command(label="Uninstall…", command=lambda: self.uninstall(e))
+        # Steam and the game own a Workshop mod's files: unsubscribing on its
+        # page is how it goes.
+        if e["group"] != "Workshop mods":
+            m.add_separator()
+            m.add_command(label="Uninstall…", command=lambda: self.uninstall(e))
         try:
             if event is not None:
                 m.tk_popup(event.x_root, event.y_root)
@@ -1513,6 +1684,7 @@ class App:
                 ("Script mods (UE4SS)", paths["ue4ss_mods"]),
                 ("Pak mods (~mods)", paths["paks"] / "~mods"),
                 ("Blueprint mods (LogicMods)", paths["paks"] / "LogicMods"),
+                ("Steam Workshop mods", (paths.get("workshop") or {}).get("root")),
                 ("Save games", palsafety.save_dir(paths["game"])),
                 ("Game folder", paths["game"]),
                 ("App data", palpaths.data_dir()),
@@ -1643,7 +1815,8 @@ class App:
         # Until the game runs, these read as starting next launch, not as
         # having failed to start in a session that ran before they were on.
         try:
-            palsafety.switched_on(self._paths["game"], switched_on)
+            palsafety.switched_on(self._paths["game"], switched_on,
+                                  self._paths["log"])
         except OSError:
             pass
         self.reload()

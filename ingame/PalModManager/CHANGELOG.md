@@ -2,6 +2,36 @@
 
 ## 1.1.0
 
+**Steam Workshop mods**
+
+- Mods Palworld installs from the Steam Workshop (since v0.7) have their own
+  group in the list, with their Workshop name, picture and page. They're
+  switched the way the game's Options > Mod Management does it, by their line
+  in `Mods\PalModSettings.ini`, and only while Palworld is closed. The app
+  never moves, renames or deletes the game's copies of them: installs, Clean
+  up and switches leave those alone, and uninstalling one means unsubscribing
+  on Steam.
+- UE4SS from the Workshop is recognised. Before, a game using only that one
+  was told "UE4SS isn't installed", mods in it were "in an inactive UE4SS
+  folder", and Install UE4SS would have added a second copy. Now its log is
+  read, mods you put in it are listed as usual, and Install UE4SS explains
+  instead.
+- UE4SS set up by hand and from the Workshop at once is flagged: Palworld loads
+  both, which can load mods twice or crash it. The banner explains how to keep
+  one. Renaming the Workshop copy's `UE4SS.dll`, as some players do to switch
+  it off, is recognised and not flagged.
+- Workshop mods are checked like the rest: whether they started, dependencies
+  that aren't subscribed or switched on, PalSchema mods without PalSchema, two
+  items with one package name (the game loads only one), file conflicts with
+  your paks, core blueprint replacements, hotkeys, and game updates. One
+  switched on in the game's own menu reads *Starts next launch* until the game
+  has run with it.
+- Every mod switched off in Mod Management gets a banner with *Switch on*. A
+  dedicated server whose settings name Workshop mods without saying which
+  folder they're in gets *Choose folder…*.
+- Shared modlists include Workshop mods with their pages, so a friend can
+  subscribe to what they're missing.
+
 **Installing UE4SS keeps your mods**
 
 - Installing or updating UE4SS used to move your mods aside with the old
@@ -76,14 +106,16 @@
 
 - A mod you switch on, or install switched on, reads *Starts next launch*
   until you play. Before, it read *Didn't start* straight away and counted
-  as a problem, though the game hadn't run since it was switched on.
+  as a problem, though the game hadn't run since it was switched on. One
+  switched on while Palworld is running waits for the run after that one.
+- "*X* overrides 1 of its files", not "1 of its file".
 - Counts agree with their verbs: "1 mod hasn't loaded", "1 mod here needs
   PalSchema", "1 file isn't part of a mod", "1 needs attention".
 
 **Command line**
 
-- `enable`, `disable` and `uninstall` accept `ue4ss:<name>`, `pak:<name>` and
-  `palschema:<name>`. A plain name works as before unless two kinds of mod
+- `enable`, `disable` and `uninstall` accept `ue4ss:<name>`, `pak:<name>`,
+  `palschema:<name>` and `workshop:<name>`. A plain name works as before unless two kinds of mod
   share it; then nothing is changed and the commands that pick each are shown.
 - `uninstall` can remove PalSchema mods, and profiles saved from the command
   line include them. Profiles saved by 1.0.0 still load.

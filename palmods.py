@@ -12,6 +12,7 @@ loaded, and reports what is working, what failed, and what is in the wrong folde
 
 A name that two kinds of mod share, such as the Lua and PalSchema halves of a
 hybrid mod, is given with its kind: ue4ss:<name>, pak:<name>, palschema:<name>.
+Steam Workshop mods go by their package name, or workshop:<name>.
 
 Writes manifest.json on every run; the in-game panel (stage 2) reads that file,
 because UE4SS Lua has io.open but no directory listing.
@@ -27,6 +28,7 @@ from pathlib import Path
 
 import palpaths
 import palregistry
+import palworkshop
 
 HERE = palpaths.data_dir()          # writable; never the frozen temp folder
 
@@ -51,6 +53,9 @@ WIN32_ERRORS = {
 # --------------------------------------------------------------------------
 # layout discovery
 # --------------------------------------------------------------------------
+WORKSHOP_LAYOUT = "Steam Workshop"
+
+
 def discover():
     """Locate every place a Palworld mod can live.
 
@@ -63,6 +68,8 @@ def discover():
     win64 = game / "Pal" / "Binaries" / "Win64"
     paks = game / "Pal" / "Content" / "Paks"
     nested, flat = win64 / "ue4ss", win64
+    kind = palpaths.kind_of(game)
+    workshop = palworkshop.scan(game, server=kind == "server")
 
     # The active root is the layout that actually has mods in it; an empty
     # Win64\Mods gets recreated by UE4SS and must not win.
@@ -76,6 +83,10 @@ def discover():
              if (d / "UE4SS.dll").is_file()]
     if len(cores) == 1:
         root, layout = cores[0]
+    elif not cores and workshop["ue4ss"] != palworkshop.NONE:
+        # No UE4SS installed by hand, and one from the Steam Workshop: the
+        # game loads that one itself, so its folder is where mods run.
+        root, layout = workshop["runtime"]["dir"], WORKSHOP_LAYOUT
     elif populated(nested / "Mods"):
         root, layout = nested, "experimental (ue4ss/)"
     elif populated(flat / "Mods"):
@@ -107,7 +118,7 @@ def discover():
 
     return {
         "game": game,
-        "kind": palpaths.kind_of(game),
+        "kind": kind,
         "win64": win64,
         "paks": paks,
         "layout": layout,
@@ -116,7 +127,34 @@ def discover():
         "log": root / "UE4SS.log",
         "mod_roots": mod_roots,
         "pak_roots": pak_roots,
+        "workshop": workshop,
     }
+
+
+def workshop_owns(paths, kind, name):
+    """Whether `name` in the given place is the official loader's copy of a
+    Steam Workshop mod, which only the game itself changes.
+
+    kind: "ue4ss" for a folder in the Workshop UE4SS's Mods, "palschema" for
+    one in its PalSchema mods, "logic" for a pak in LogicMods. LogicMods is
+    shared with mods from elsewhere, so a pak there only counts while its
+    Workshop mod is switched on.
+    """
+    ws = paths.get("workshop")
+    if not ws:
+        return False
+    key = name.casefold()
+    if kind == "logic":
+        return key in ws["shared"]["logic"]
+    if kind == "ue4ss":
+        return key in ws["own"]["lua"] and name not in BUILTIN
+    return key in ws["own"]["palschema"]
+
+
+def in_workshop_ue4ss(paths, folder):
+    """Whether `folder` is inside the UE4SS the official loader set up."""
+    rt = (paths.get("workshop") or {}).get("runtime")
+    return bool(rt) and palworkshop.inside(folder, rt["dir"])
 
 
 # --------------------------------------------------------------------------
@@ -141,17 +179,40 @@ def ue4ss_status(paths, log=None):
         log = parse_log(paths["log"])
     version = (log.get("ue4ss_version") or "").split(" - Git")[0] or None
 
+    ws = paths.get("workshop") or {}
     st = {"installed": nested or flat, "state": "ok", "layout": None,
           "version": version, "proxy": proxy,
           "ran": bool(log.get("found") and log.get("when")),
-          "problems": [], "summary": ""}
+          "problems": [], "summary": "",
+          # What the Steam Workshop's UE4SS does; see palworkshop.scan.
+          "workshop": ws.get("ue4ss", palworkshop.NONE), "twice": False}
+
+    if paths["layout"] == WORKSHOP_LAYOUT:
+        return _workshop_status(st, ws)
 
     if not (nested or flat):
         st["state"] = "missing"
         st["summary"] = "UE4SS not installed"
-        st["problems"].append(
-            "UE4SS isn't installed, so UE4SS mods and LogicMods blueprint mods "
-            "won't load. Content paks in ~mods work without it.")
+        scripts = [it["title"] for it in ws.get("items", [])
+                   if it["listed"] and {"Lua", "PalSchema"} & set(it["types"])]
+        if scripts and ws["settings"]["global_on"]:
+            # Workshop script mods only ever run in the Workshop's UE4SS:
+            # the game puts them in its folder. One installed by hand runs
+            # mods from elsewhere, and both together is a crash waiting.
+            st["from_workshop"] = True
+            how = ("Put it in this server's Workshop folder, and add "
+                   "ActiveModList=UE4SS to its Mods\\PalModSettings.ini."
+                   if ws["server"] else
+                   "Subscribe to it there, then switch it on in "
+                   f"{palworkshop.menu()}.")
+            st["problems"].append(
+                "UE4SS isn't installed, and your Steam Workshop script mods "
+                f"({', '.join(scripts[:3])}{' and more' if len(scripts) > 3 else ''}) "
+                f"need the UE4SS from the Workshop. {how}")
+        else:
+            st["problems"].append(
+                "UE4SS isn't installed, so UE4SS mods and LogicMods blueprint mods "
+                "won't load. Content paks in ~mods work without it.")
         if proxy:
             st["problems"].append(
                 f"{proxy} is still in Win64 without UE4SS.dll -- leftovers "
@@ -182,9 +243,64 @@ def ue4ss_status(paths, log=None):
             "Palworld mods need the experimental-palworld build, which "
             "installs into Win64\\ue4ss.")
 
+    if ws.get("runs"):
+        # Pocketpair: a UE4SS installed by hand alongside the Workshop's "may
+        # cause double loading, conflicts or crashes". Players who keep their
+        # own switch the Workshop's off, so that is the first way out offered.
+        st["state"], st["twice"] = "conflict", True
+        st["problems"].insert(0, TWICE)
+        st["problems"].append(_twice_how(ws["server"]))
+
     bits = [f"UE4SS {version}" if version else "UE4SS",
             f"{st['layout']} layout"]
     if not st["ran"]:
+        bits.append("not run yet")
+    st["summary"] = " · ".join(bits)
+    return st
+
+
+TWICE = ("UE4SS is set up twice: by hand in Pal\\Binaries\\Win64, and from the "
+         "Steam Workshop. Palworld loads both, which can load mods twice or "
+         "crash the game. Keep one.")
+
+
+def _twice_how(server):
+    off = ("take ActiveModList=UE4SS out of this server's Mods\\PalModSettings.ini"
+           if server else
+           f"switch UE4SS off in {palworkshop.menu()}")
+    return (f"To keep the one in Win64, {off}; Workshop script mods only run in "
+            f"the Workshop's, so they stop too. To keep the Workshop's, move any "
+            f"mods you want from Win64\\ue4ss\\Mods into "
+            f"Mods\\NativeMods\\UE4SS\\Mods, then delete dwmapi.dll and the "
+            f"ue4ss folder from Win64.")
+
+
+def _workshop_status(st, ws):
+    """ue4ss_status() for the UE4SS that Palworld installs from the Workshop."""
+    state = ws["ue4ss"]
+    st["installed"], st["layout"] = True, "workshop"
+    where = "UE4SS from the Steam Workshop"
+    menu = palworkshop.menu(ws["server"])
+    if state == palworkshop.MODS_OFF:
+        st["state"] = "warn"
+        st["problems"].append(
+            f"Mods are switched off in {menu}, so {where} won't load, and nor "
+            f"will mods that need it.")
+    elif state == palworkshop.SWITCHED_OFF:
+        st["state"] = "warn"
+        st["problems"].append(
+            f"{where} is switched off in {menu}, so mods that need it won't load.")
+    elif state == palworkshop.NO_DLL:
+        st["state"] = "broken"
+        st["problems"].append(
+            f"{where} is switched on, but its UE4SS.dll is missing from "
+            f"Mods\\NativeMods\\UE4SS, so it won't load, and nor will mods "
+            f"that need it.")
+    version = st["version"]
+    bits = [f"UE4SS {version} from the Steam Workshop" if version else where]
+    if state == palworkshop.PENDING:
+        bits.append("installs when Palworld next starts")
+    elif not st["ran"] and state == palworkshop.RUNS:
         bits.append("not run yet")
     st["summary"] = " · ".join(bits)
     return st
@@ -465,23 +581,32 @@ def is_mod_dir(d):
     return any((d / s).exists() for s in MOD_SIGNS)
 
 
-def scan_ue4ss(paths, log):
+def scan_ue4ss(paths, log, workshop_log=None):
     """Scan every UE4SS mod folder, not just the active one.
 
     A mod present in more than one root is reported once, from the active root,
-    since that is the copy UE4SS will actually load.
+    since that is the copy UE4SS will actually load. In the Workshop UE4SS's
+    folder, the copies of Workshop mods that the game put there are left to
+    their own rows; mods from elsewhere in it are listed like any other.
     """
     mods, seen = [], {}
     active = paths["ue4ss_mods"]
+    ws = paths.get("workshop") or {}
+    ws_mods = ws.get("runtime", {}).get("mods")
     ordered = sorted(paths["mod_roots"], key=lambda lp: lp[1] != active)
     for label, rootdir in ordered:
-        # The log describes the active root only.
-        root_log = log if rootdir == active else None
+        # The log describes the active root only. The Workshop's UE4SS writes
+        # its own, and runs beside one installed by hand when both are on.
+        runs_too = rootdir == ws_mods and rootdir != active and ws.get("runs")
+        root_log = (log if rootdir == active
+                    else workshop_log if runs_too else None)
         toggles = load_toggles(rootdir, root_log)
         lists = read_mod_lists(rootdir)
         used = list_in_use(rootdir, root_log)
         for d in sorted(rootdir.iterdir()):
             if not d.is_dir() or d.name == "shared" or not is_mod_dir(d):
+                continue
+            if rootdir == ws_mods and workshop_owns(paths, "ue4ss", d.name):
                 continue
             if d.name in seen:
                 seen[d.name]["also_in"].append(label)
@@ -498,11 +623,12 @@ def scan_ue4ss(paths, log):
                 "list_conflict": (d.name in lists["mods.txt"] and d.name in lists["mods.json"]
                                   and lists["mods.txt"][d.name] != lists["mods.json"][d.name]),
                 "list_used": used,
-                "loaded": d.name in log["started"],
-                "version": log["started"].get(d.name),
-                "failures": [f["detail"] for f in log["failures"] if f["mod"] == d.name],
+                "loaded": d.name in (root_log or log)["started"],
+                "version": (root_log or log)["started"].get(d.name),
+                "failures": [f["detail"] for f in (root_log or log)["failures"]
+                             if f["mod"] == d.name],
                 "path": str(d), "location": label, "also_in": [],
-                "inactive_root": rootdir != active,
+                "inactive_root": rootdir != active and not runs_too,
                 # Found once here rather than per repaint: this walks the mod's
                 # whole folder, and the UI used to redo it on every keystroke.
                 "configs": [str(c) for c in find_configs(d)],
@@ -512,7 +638,10 @@ def scan_ue4ss(paths, log):
     return mods
 
 
-def scan_paks(paths, log):
+def scan_paks(paths, log, bp_mods=None):
+    """Every pak in the folders paks are read from. `bp_mods` names the
+    blueprint mods BPModLoaderMod started, from every UE4SS log that ran."""
+    bp_mods = log["bp_mods"] if bp_mods is None else bp_mods
     out = []
     for label, folder in paths["pak_roots"]:
         for p in sorted(folder.iterdir()):
@@ -522,6 +651,10 @@ def scan_paks(paths, log):
             if p.name.lower().startswith("pal-windows"):
                 continue
             disabled = p.suffix.lower() == ".disabled"
+            # The game's copy of a Workshop blueprint mod: it has its own row.
+            if label == "LogicMods" and not disabled \
+                    and workshop_owns(paths, "logic", p.name.split(".pak")[0]):
+                continue
             info = read_pak(p)
             expected, desc = classify_pak(info)
             stem = p.name.split(".pak")[0]
@@ -534,8 +667,8 @@ def scan_paks(paths, log):
                 "files": info.get("files", []),
                 "misplaced": (not disabled) and expected is not None and expected != label,
                 # Only LogicMods blueprint mods announce themselves in the log.
-                "loaded": stem in log["bp_mods"] or any(
-                    stem.lower() in b.lower() for b in log["bp_mods"]),
+                "loaded": stem in bp_mods or any(
+                    stem.lower() in b.lower() for b in bp_mods),
                 "path": str(p),
             })
     return out
@@ -556,18 +689,34 @@ def palschema_dirs(paths):
     return base, base / "mods", base / PALSCHEMA_OFF
 
 
+def palschema_lines(log_path):
+    """Lines of the latest run in a UE4SS log that mention PalSchema."""
+    try:
+        if not Path(log_path).is_file():
+            return []
+        text = ANSI.sub("", Path(log_path).read_text("utf8", "replace"))
+    except OSError:
+        return []
+    starts = [m.start() for m in re.finditer(r"UE4SS - v", text)]
+    text = text[starts[-1]:] if starts else text
+    return [ln for ln in text.splitlines() if "palschema" in ln.lower()]
+
+
 def scan_palschema(paths, log, ue4ss_mods):
     base, on_dir, off_dir = palschema_dirs(paths)
     framework = next((m for m in ue4ss_mods if m["name"] == "PalSchema"), None)
-    lines = []
-    if log.get("found") and paths["log"].is_file():
-        try:
-            text = ANSI.sub("", paths["log"].read_text("utf8", "replace"))
-            starts = [m.start() for m in re.finditer(r"UE4SS - v", text)]
-            text = text[starts[-1]:] if starts else text
-            lines = [ln for ln in text.splitlines() if "palschema" in ln.lower()]
-        except OSError:
-            pass
+    if framework is not None:
+        framework = {"on": framework["enabled"]}
+    ws = paths.get("workshop") or {}
+    workshop_base = in_workshop_ue4ss(paths, base)
+    if framework is None and workshop_base:
+        # In the Workshop's UE4SS, PalSchema itself comes from the Workshop.
+        core = [it for it in ws.get("items", []) if not it["error"]
+                and it["package"].casefold() == "palschema"]
+        if core:
+            framework = {"on": ws["settings"]["global_on"]
+                         and any(it["listed"] for it in core)}
+    lines = palschema_lines(paths["log"]) if log.get("found") else []
 
     out = []
     for folder, enabled in ((on_dir, True), (off_dir, False)):
@@ -575,6 +724,9 @@ def scan_palschema(paths, log, ue4ss_mods):
             continue
         for d in sorted(folder.iterdir()):
             if not d.is_dir():
+                continue
+            # The game's copies of Workshop PalSchema mods have their own rows.
+            if workshop_base and workshop_owns(paths, "palschema", d.name):
                 continue
             files = [f for f in d.rglob("*") if f.is_file()]
             parts = sorted({f.relative_to(d).parts[0] for f in files
@@ -585,9 +737,154 @@ def scan_palschema(paths, log, ue4ss_mods):
                 "file_count": len(files), "sections": parts,
                 "loaded": enabled and mentioned,
                 "framework": bool(framework),
-                "framework_on": bool(framework and framework["enabled"]),
+                "framework_on": bool(framework and framework["on"]),
             })
     return out
+
+
+# --------------------------------------------------------------------------
+# Steam Workshop mods
+# --------------------------------------------------------------------------
+# Palworld installs these itself, from the packages Steam keeps in its
+# Workshop folder, into folders of the game. Rows here come from the packages;
+# the game's copies are never listed twice, and never touched.
+def _runtime_note(ws, manual):
+    """Why a Workshop script mod can't start here, given the Workshop UE4SS."""
+    state = ws["ue4ss"]
+    if state == palworkshop.SWITCHED_OFF:
+        return ("needs UE4SS from the Steam Workshop, which is switched off "
+                f"in {palworkshop.menu(ws['server'], short=True)}")
+    if state == palworkshop.NO_DLL:
+        return ("needs UE4SS from the Steam Workshop, and its UE4SS.dll is "
+                "missing")
+    if manual:
+        return ("runs only in UE4SS from the Steam Workshop, and yours is "
+                "installed by hand")
+    return "needs UE4SS from the Steam Workshop"
+
+
+def scan_workshop(paths, log, workshop_log, ue4ss):
+    """(records, paks): a record per subscribed Workshop mod, and its paks as
+    the conflict checks read them.
+
+    `workshop_log` is the Workshop UE4SS's log when that UE4SS runs (or is
+    the only one), else None: a log it wrote before it was switched off says
+    nothing about what loads now.
+    """
+    ws = paths.get("workshop") or {}
+    items = ws.get("items") or []
+    if not items:
+        return [], []
+    settings = ws["settings"]
+    wlog = workshop_log or {"started": {}, "bp_mods": [], "failures": [],
+                            "found": False, "when": None}
+    started = {n.casefold() for n in wlog["started"]}
+    bp_mods = log["bp_mods"] + (wlog["bp_mods"] if wlog is not log else [])
+    schema_lines = (palschema_lines(ws["runtime"]["log"])
+                    if workshop_log is not None else [])
+    manual = ue4ss["installed"] and ue4ss["layout"] != "workshop"
+    by_name = {}
+    for it in items:
+        if not it["error"]:
+            by_name.setdefault(it["package"].casefold(), []).append(it)
+    # PalSchema itself, where Workshop PalSchema mods are put: the Workshop's,
+    # switched on, or else one installed by hand into the Workshop's UE4SS.
+    if by_name.get("palschema"):
+        schema_core = any(d["listed"] for d in by_name["palschema"])
+    else:
+        schema_core = (ws["runtime"]["mods"] / "PalSchema" / "dlls"
+                       / "main.dll").is_file()
+
+    out, all_paks, seen = [], [], set()
+    for it in items:
+        name = it["package"] or it["id"]
+        # Items sharing a package name share one ActiveModList line, and the
+        # game loads one of them, which one not fixed: so they get one row.
+        if not it["error"]:
+            if name.casefold() in seen:
+                continue
+            seen.add(name.casefold())
+        types = it["types"]
+        applies = bool(types) and not it["for_other"]
+        enabled = it["listed"] and settings["global_on"]
+        rec = {"name": name, "title": it["title"], "item": it["id"],
+               "version": it["version"], "author": it["author"],
+               "types": types, "listed": it["listed"], "enabled": enabled,
+               "applies": applies, "for_other": it["for_other"],
+               "switchable": it["switchable"], "error": it["error"],
+               "url": it["url"], "path": str(it["path"]),
+               "thumbnail": str(it["thumbnail"]) if it["thumbnail"] else None,
+               "deps_missing": [], "deps_off": [], "duplicate": [],
+               "needs": None, "loggable": False, "loaded": False,
+               "failures": [], "paks": []}
+        out.append(rec)
+        if it["error"]:
+            continue
+        rec["duplicate"] = [d["title"] for d in by_name[name.casefold()] if d is not it]
+
+        if {"Lua", "PalSchema"} & set(types) and not ws["runs"]:
+            rec["needs"] = _runtime_note(ws, manual)
+        elif "LogicMods" in types and not (ws["runs"] or manual):
+            rec["needs"] = "needs UE4SS"
+        elif "UE4SS" in types and ws["ue4ss"] == palworkshop.NO_DLL:
+            rec["needs"] = ("its UE4SS.dll is missing from "
+                            "Mods\\NativeMods\\UE4SS, so it can't load")
+        elif "PalSchema" in types and not schema_core:
+            # Its files go into PalSchema's own folder, for PalSchema to read.
+            rec["needs"] = "needs PalSchema, from the Steam Workshop"
+        for dep in it["deps"]:
+            if rec["needs"] and dep.casefold() in ("ue4ss", "palschema"):
+                continue                      # the note above says it
+            have = by_name.get(dep.casefold())
+            if not have:
+                rec["deps_missing"].append(dep)
+            elif not any(d["listed"] for d in have):
+                rec["deps_off"].append(have[0]["title"])
+        rec["loggable"] = (enabled and applies and not rec["needs"]
+                           and bool(palworkshop.LOGGED & set(types)))
+
+        stems = []
+        for kind, folder in (("Paks", "~WorkshopMods"), ("LogicMods", "LogicMods")):
+            if kind not in types:
+                continue
+            for f in palworkshop.files_of(it, kind):
+                info = read_pak(f)
+                stem = f.name.split(".pak")[0]
+                if kind == "LogicMods":
+                    stems.append(stem.lower())
+                pak = {"name": f"{stem} (Workshop)", "stem": stem, "file": f.name,
+                       "folder": folder, "disabled": not (enabled and applies),
+                       "expected_folder": None, "workshop": name,
+                       "files": info.get("files", []), "mount": info.get("mount")}
+                all_paks.append(pak)
+                rec["paks"].append(pak["name"])
+
+        if "Lua" in types and name.casefold() in started:
+            rec["loaded"] = True
+        if stems and any(st in b.lower() for st in stems for b in bp_mods):
+            rec["loaded"] = True
+        if "UE4SS" in types and wlog["found"] and wlog["when"]:
+            rec["loaded"] = True
+        if "PalSchema" in types and any(name.lower() in ln.lower()
+                                        for ln in schema_lines):
+            rec["loaded"] = True
+        rec["failures"] = [f["detail"] for f in wlog["failures"]
+                           if f["mod"].casefold() == name.casefold()]
+    return out, all_paks
+
+
+def workshop_summary(paths):
+    """What the app needs to say about the official loader, JSON-safe."""
+    ws = paths.get("workshop") or {}
+    if not ws:
+        return {}
+    st = ws["settings"]
+    return {"ue4ss": ws["ue4ss"], "runs": ws["runs"], "server": ws["server"],
+            "global_on": st["global_on"], "settings_exist": st["exists"],
+            "settings": str(palworkshop.settings_file(paths["game"])),
+            "root": str(ws["root"]) if ws["root"] else None,
+            "root_set": st["root"], "active": list(st["active"]),
+            "log": str(ws["runtime"]["log"])}
 
 
 # --------------------------------------------------------------------------
@@ -605,29 +902,53 @@ def age_note(entry):
 # --------------------------------------------------------------------------
 # toggling
 # --------------------------------------------------------------------------
-KIND_LABELS = {"ue4ss": "UE4SS mod", "pak": "pak", "palschema": "PalSchema mod"}
+KIND_LABELS = {"ue4ss": "UE4SS mod", "pak": "pak", "palschema": "PalSchema mod",
+               "workshop": "Steam Workshop mod"}
 
 
 def _ue4ss_folder(paths, name):
-    """(Mods folder, mod folder) for the UE4SS mod called `name`, or None."""
+    """(Mods folder, mod folder) for the UE4SS mod called `name`, or None.
+    The game's copy of a Workshop mod is the game's, so never this."""
+    ws_mods = (paths.get("workshop") or {}).get("runtime", {}).get("mods")
     for _, rootdir in paths["mod_roots"]:
+        if rootdir == ws_mods and workshop_owns(paths, "ue4ss", name):
+            continue
         d = rootdir / name
         if d.is_dir() and is_mod_dir(d):
             return rootdir, d
     return None
 
 
+def _theirs(paths, label, pak):
+    """Whether a pak file is the game's copy of a Workshop blueprint mod."""
+    return (label == "LogicMods" and pak.name.lower().endswith(".pak")
+            and workshop_owns(paths, "logic", pak.name[:-4]))
+
+
 def _pak_files(paths, name):
     """The pak called `name`, on or off, in every folder paks are read from."""
-    return [p for _, folder in paths["pak_roots"]
+    return [p for label, folder in paths["pak_roots"]
             for p in (folder / f"{name}.pak", folder / f"{name}.pak.disabled")
-            if p.is_file()]
+            if p.is_file() and not _theirs(paths, label, p)]
+
+
+def _palschema_theirs(paths, name):
+    """Whether a PalSchema mod folder is the game's copy of a Workshop mod."""
+    base, _, _ = palschema_dirs(paths)
+    return in_workshop_ue4ss(paths, base) and workshop_owns(paths, "palschema", name)
 
 
 def _plain_name(name):
     """A mod's name is one folder or file name. A path or an empty name would
     reach past the mod folders: '' is the PalSchema mods folder itself."""
     return bool(name) and name not in (".", "..") and not any(c in name for c in "\\/:")
+
+
+def _workshop_item(paths, name):
+    """The subscribed Workshop mod whose package name is `name`, or None."""
+    items = (paths.get("workshop") or {}).get("items", [])
+    return next((it for it in items if not it["error"]
+                 and it["package"].casefold() == name.casefold()), None)
 
 
 def kinds_of(name, paths=None):
@@ -638,7 +959,9 @@ def kinds_of(name, paths=None):
     _, on_dir, off_dir = palschema_dirs(paths)
     found = {"ue4ss": _ue4ss_folder(paths, name) is not None,
              "pak": bool(_pak_files(paths, name)),
-             "palschema": (on_dir / name).is_dir() or (off_dir / name).is_dir()}
+             "palschema": ((on_dir / name).is_dir() or (off_dir / name).is_dir())
+                          and not _palschema_theirs(paths, name),
+             "workshop": _workshop_item(paths, name) is not None}
     return [k for k in palregistry.KINDS if found[k]]
 
 
@@ -697,8 +1020,10 @@ def _toggle_ue4ss(paths, name, on):
 
 
 def _toggle_pak(paths, name, on):
-    for _, folder in paths["pak_roots"]:
+    for label, folder in paths["pak_roots"]:
         live, off = folder / f"{name}.pak", folder / f"{name}.pak.disabled"
+        if _theirs(paths, label, live):
+            continue
         if on and off.is_file() and not live.exists():
             off.rename(live)
             return f"pak '{name}' -> enabled (applies next launch)"
@@ -711,6 +1036,8 @@ def _toggle_pak(paths, name, on):
 
 
 def _toggle_palschema(paths, name, on):
+    if _palschema_theirs(paths, name):
+        return None
     _, on_dir, off_dir = palschema_dirs(paths)
     src, dst = ((off_dir / name, on_dir / name) if on
                 else (on_dir / name, off_dir / name))
@@ -726,16 +1053,39 @@ def _toggle_palschema(paths, name, on):
     return None
 
 
-TOGGLES = {"ue4ss": _toggle_ue4ss, "pak": _toggle_pak, "palschema": _toggle_palschema}
+def _toggle_workshop(paths, name, on):
+    """Switch a Workshop mod the way the game's Mod Management does: by its
+    line in Mods\\PalModSettings.ini. The game's copies of it are its own."""
+    item = _workshop_item(paths, name)
+    if item is None:
+        return None
+    if not item["switchable"]:
+        server = paths["workshop"]["server"]
+        raise PermissionError(
+            f"'{item['title']}' has a package name the game's uploader doesn't "
+            f"allow, so switching it is left to {palworkshop.menu(server)}.")
+    import palsafety          # imports this module; kept local to avoid a cycle
+    if palsafety.game_running(paths["game"]):
+        raise PermissionError(
+            "Close Palworld first: it keeps its own Workshop mod list while it "
+            "runs, and may save that over this change when it exits.")
+    palworkshop.set_active(paths["game"], item["package"], on)
+    return (f"Workshop mod '{item['title']}' -> {'enabled' if on else 'disabled'} "
+            f"(applies next launch)")
+
+
+TOGGLES = {"ue4ss": _toggle_ue4ss, "pak": _toggle_pak, "palschema": _toggle_palschema,
+           "workshop": _toggle_workshop}
 
 
 def set_enabled(name, on, kind=None):
     """Toggle a mod wherever it lives: any UE4SS root, pak folder or PalSchema.
 
     One name can belong to two kinds of mod: a hybrid mod often ships a Lua mod
-    and a PalSchema mod in folders of the same name. `kind` ("ue4ss", "pak" or
-    "palschema") says which one is meant. Without it, a shared name is refused
-    instead of guessed at, because a guess switches off the wrong half.
+    and a PalSchema mod in folders of the same name. `kind` ("ue4ss", "pak",
+    "palschema" or "workshop") says which one is meant. Without it, a shared
+    name is refused instead of guessed at, because a guess switches off the
+    wrong half. A Workshop mod is named by its package name.
     """
     if kind is not None and kind not in TOGGLES:
         raise ValueError(f"unknown kind of mod: {kind!r}")
@@ -762,24 +1112,45 @@ def build(paths):
     import palsafety          # imports this module; kept local to avoid a cycle
 
     log = parse_log(paths["log"])
-    ue4ss = scan_ue4ss(paths, log)
-    paks = scan_paks(paths, log)
+    # The Workshop's UE4SS writes a log of its own. It is the log when that
+    # UE4SS is the only one; beside one installed by hand, both are read.
+    ws = paths.get("workshop") or {}
+    ws_log_path = ws.get("runtime", {}).get("log")
+    if ws_log_path == paths["log"]:
+        ws_log = log
+    elif ws.get("runs"):
+        ws_log = parse_log(ws_log_path)
+    else:
+        ws_log = None
+    ue4ss = scan_ue4ss(paths, log, ws_log)
+    bp_mods = log["bp_mods"] + (ws_log["bp_mods"]
+                                if ws_log is not None and ws_log is not log else [])
+    paks = scan_paks(paths, log, bp_mods)
+    status = ue4ss_status(paths, log)
+    workshop, workshop_paks = scan_workshop(paths, log, ws_log, status)
     data = {
         "generated": datetime.now().isoformat(timespec="seconds"),
         "layout": paths["layout"], "log": log,
         "install": {"path": str(paths["game"]), "kind": paths["kind"],
                     "label": palpaths.label(paths["game"])},
-        "ue4ss": ue4ss_status(paths, log),
+        "ue4ss": status,
         "ue4ss_mods": ue4ss,
         "pak_mods": paks,
         "palschema_mods": scan_palschema(paths, log, ue4ss),
+        "workshop_mods": workshop,
+        "workshop": workshop_summary(paths),
         "registry": load_registry(),
     }
-    data["conflicts"] = palsafety.pak_conflicts(paks)
-    data["core_overrides"] = palsafety.core_overrides(paks)
+    data["conflicts"] = palsafety.pak_conflicts(paks + workshop_paks)
+    data["core_overrides"] = palsafety.core_overrides(paks + workshop_paks)
     for p in paks:
         p.pop("files", None)      # thousands of paths; not worth keeping
-    data["keybinds"] = palsafety.keybind_report(ue4ss)
+    # Workshop script mods bind keys too; their hotkeys are read from the
+    # package Steam keeps, which is what the game copies.
+    scripts = [{"name": w["name"], "enabled": w["enabled"], "builtin": False,
+                "path": w["path"]} for w in workshop
+               if "Lua" in w["types"] and not w["error"]]
+    data["keybinds"] = palsafety.keybind_report(ue4ss + scripts)
     data["build"] = palsafety.build_info(paths["game"])
     data["patch"] = palsafety.observe(paths, data)
     return data
@@ -927,6 +1298,17 @@ def snapshot(paths):
     bits = []
     _, ps_on, ps_off = palschema_dirs(paths)
     extra = [("PalSchema", d) for d in (ps_on, ps_off) if d.is_dir()]
+    # Steam adds, updates and removes Workshop items, and the game's own menu
+    # rewrites its mod list; both show up as changes here.
+    ws = paths.get("workshop") or {}
+    if ws:
+        extra += [("Workshop", d) for d in (ws["root"], paths["paks"] / "~WorkshopMods")
+                  if d is not None and d.is_dir()]
+        ini = palworkshop.settings_file(paths["game"])
+        try:
+            bits.append(f"ini:{ini.stat().st_mtime_ns}")
+        except OSError:
+            bits.append("ini:none")
     for _, d in paths["mod_roots"] + paths["pak_roots"] + extra:
         try:
             for c in sorted(d.iterdir()):
@@ -1011,6 +1393,33 @@ def report(data):
         if (note := age_note(reg.get(p["name"], {}))):
             L.append(f"        - {note}")
 
+    workshop = data.get("workshop_mods") or []
+    if workshop:
+        ws = data.get("workshop") or {}
+        L.append("\n  STEAM WORKSHOP MODS"
+                 + ("" if ws.get("global_on") else "   (mods are off in Mod Management)"))
+        for w in workshop:
+            if w["error"]:
+                state = "UNREADABLE"
+            elif not w["listed"]:
+                state = "off"
+            elif not w["enabled"]:
+                state = "mods off in game"
+            elif w["needs"]:
+                state = "can't start"
+            elif w["loaded"]:
+                state = "LOADED"
+            elif w["loggable"]:
+                state = "not loaded"
+            else:
+                state = "on"
+            kinds = ", ".join(palworkshop.TYPE_LABELS.get(t, t) for t in w["types"])
+            ver = f" v{w['version']}" if w["version"] else ""
+            L.append(f"    {w['title'][:30]:<31}{ver:<10}{kinds:<24}{state}")
+            for note in [w["error"], w["needs"]] + w["failures"]:
+                if note:
+                    L.append(f"        ! {note}")
+
     warn = [f"{p['name']}: in {p['folder']}, belongs in {p['expected_folder']} ({p['type']})"
             for p in data["pak_mods"] if p["misplaced"]]
     warn += [f"{m['name']}: {f}" for m in user for f in m["failures"]]
@@ -1022,6 +1431,17 @@ def report(data):
              and not p["disabled"] and not p["loaded"]]
     warn += [f"{p['name']}: {p['error']}" for p in data["pak_mods"] if p.get("error")]
     warn += [f"UE4SS: {msg}" for msg in data["ue4ss"]["problems"]]
+    for w in workshop:
+        if w["enabled"] and w["deps_missing"]:
+            warn.append(f"{w['title']}: needs {', '.join(w['deps_missing'])}, "
+                        f"which isn't subscribed")
+        if w["enabled"] and w["deps_off"]:
+            warn.append(f"{w['title']}: needs {', '.join(w['deps_off'])} "
+                        f"switched on")
+        if w["duplicate"] and w["listed"]:
+            warn.append(f"{w['title']}: {len(w['duplicate'])} more Workshop "
+                        f"item(s) have the package name {w['name']}; only one "
+                        f"of them loads")
     patch = data["patch"]
     if patch["updated"]:
         warn.append(f"Palworld updated to {patch['build']} since mods last ran "
@@ -1357,7 +1777,9 @@ def cmd_uninstall(args):
     where = {"ue4ss": [m["path"] for m in data["ue4ss_mods"] if m["name"] == name],
              "pak": [p["path"] for p in data["pak_mods"] if p["name"] == name],
              "palschema": [s["path"] for s in data["palschema_mods"]
-                           if s["name"] == name]}
+                           if s["name"] == name],
+             "workshop": [w["path"] for w in data["workshop_mods"]
+                          if w["name"].casefold() == name.casefold()]}
     have = [k for k in palregistry.KINDS
             if where[k] or palregistry.receipt(k, name)]
     if kind is None and len(have) > 1:
@@ -1366,6 +1788,10 @@ def cmd_uninstall(args):
     kind = kind or (have[0] if have else None)
     if kind not in have:
         print(f"No mod named '{args.name}'.")
+        return 1
+    if kind == "workshop":
+        print(f"'{name}' is a Steam Workshop mod. Unsubscribe from it on its "
+              f"Workshop page, and Steam and Palworld remove it.")
         return 1
     if not args.yes:
         ans = input(f"Delete '{args.name}' from disk? [y/N] ").strip().lower()
@@ -1416,7 +1842,10 @@ def cmd_profile(args):
     mods = ([("ue4ss", m["name"], m["enabled"]) for m in data["ue4ss_mods"]
              if not m["builtin"]]
             + [("pak", p["name"], not p["disabled"]) for p in data["pak_mods"]]
-            + [("palschema", s["name"], s["enabled"]) for s in data["palschema_mods"]])
+            + [("palschema", s["name"], s["enabled"]) for s in data["palschema_mods"]]
+            # A Workshop mod's switch is its line in the game's mod list.
+            + [("workshop", w["name"], w["listed"]) for w in data["workshop_mods"]
+               if not w["error"] and w["switchable"]])
     ids = [palregistry.mod_id(k, n) for k, n, _ in mods]
     on = [palregistry.mod_id(k, n) for k, n, enabled in mods if enabled]
 
@@ -1476,7 +1905,8 @@ def main():
     d = sub.add_parser("doctor", help="detect a conflicting second UE4SS install")
     d.add_argument("--fix", action="store_true", help="repair what it finds")
     name_help = ("the mod's name, or kind:name when two kinds of mod share it "
-                 "(ue4ss:, pak: or palschema:)")
+                 "(ue4ss:, pak:, palschema: or workshop:). A Steam Workshop mod "
+                 "goes by its package name")
     for verb in ("enable", "disable"):
         sub.add_parser(verb, help=f"{verb} a mod").add_argument("name", help=name_help)
 

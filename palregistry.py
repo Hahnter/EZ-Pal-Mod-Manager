@@ -52,7 +52,7 @@ def _file(name):
 # installed in the game and in a dedicated server. Registry entries stay keyed
 # by name, so both halves and both installs share one page link and one
 # description. Whatever acts on files goes by kind and name.
-KINDS = ("ue4ss", "pak", "palschema")
+KINDS = ("ue4ss", "pak", "palschema", "workshop")
 
 
 def mod_id(kind, name):

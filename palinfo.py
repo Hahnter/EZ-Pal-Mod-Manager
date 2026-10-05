@@ -7,6 +7,7 @@ from tkinter import filedialog, messagebox
 
 import palmedia
 import palregistry
+import palworkshop
 from paltext import plural
 from palui import (open_link, BG, SURFACE, RAISED, LINE, TEXT, DIM, FAINT, ACCENT, GOOD,
                    WARN, BAD, Pill, button, dark_titlebar, menu as dark_menu,
@@ -89,19 +90,26 @@ class ModInfoWindow(Window):
         self.entry = entry
         meta = palregistry.get(self.mod)
         # The list rows stay lean; type, folder and version are shown here.
+        workshop = entry.get("workshop")
         kind = {"lua": "Lua script mod", "c++": "C++ script mod",
                 "palschema": "PalSchema mod"}.get(entry["kind"])
-        if kind is None:
-            kind = "blueprint pak" if entry.get("where") == "LogicMods" else "pak mod"
-        bits = [f"{kind} in {entry.get('where', '?')}",
-                palregistry.describe_source(self.mod, meta)]
-        version = meta.get("version") or (entry.get("extra")
-                                          if entry["group"] == "UE4SS mods" else None)
+        if workshop:
+            kinds = [palworkshop.TYPE_LABELS.get(t, t) for t in workshop["types"]]
+            bits = ["Steam Workshop mod" + (f" ({', '.join(kinds)})" if kinds else ""),
+                    f"by {workshop['author']}" if workshop["author"] else
+                    f"item {workshop['item']}"]
+        else:
+            if kind is None:
+                kind = "blueprint pak" if entry.get("where") == "LogicMods" else "pak mod"
+            bits = [f"{kind} in {entry.get('where', '?')}",
+                    palregistry.describe_source(self.mod, meta)]
+        version = meta.get("version") or (entry.get("extra") if entry["group"] in
+                                          ("UE4SS mods", "Workshop mods") else None)
         if version:
             bits.append(f"v{version}")
         bits.append(entry["state"][:1].upper() + entry["state"][1:])
         sub = "   ·   ".join(bits)
-        super().__init__(app, self.mod, sub, size="840x820")
+        super().__init__(app, entry.get("label") or self.mod, sub, size="840x820")
         self.minsize(700, 520)
         self._photos = []
         self.shown = None                   # image shown in the hero area
@@ -109,7 +117,8 @@ class ModInfoWindow(Window):
 
         button(self.foot, "Save", self._save, "primary", app.f_name,
                (22, 8)).pack(side="right")
-        self.page_btn = button(self.foot, "Open mod page", self._open_page,
+        self.page_btn = button(self.foot, "Open Workshop page" if workshop
+                               else "Open mod page", self._open_page,
                                "quiet", app.f_small, (14, 8))
         self.page_btn.pack(side="right", padx=8)
         self.protocol("WM_DELETE_WINDOW", self._close)
@@ -165,9 +174,15 @@ class ModInfoWindow(Window):
                         highlightthickness=1, highlightbackground=LINE)
         hero.pack(fill="x")
         hero.pack_propagate(False)
-        if self.shown:
+        # With none of your own, a Workshop mod shows the picture it ships,
+        # as its row in the list does.
+        shown = self.shown
+        thumb = (self.entry.get("workshop") or {}).get("thumbnail")
+        if not shown and thumb and Path(thumb).is_file():
+            shown = Path(thumb)
+        if shown:
             try:
-                img = photo(palmedia.thumbnail(self.shown, *self.HERO, fit="contain"))
+                img = photo(palmedia.thumbnail(shown, *self.HERO, fit="contain"))
             except (palmedia.MediaError, OSError):
                 img = None
             self._photos.append(img)
@@ -175,8 +190,9 @@ class ModInfoWindow(Window):
                            text="" if img else "Couldn't display this picture",
                            fg=FAINT)
             lbl.pack(fill="both", expand=True)
+            gallery = images if shown in images else [shown]
             lbl.bind("<Button-1>", lambda _e: ImageViewer(
-                self, images, images.index(self.shown)))
+                self, gallery, gallery.index(shown)))
         else:
             empty = tk.Frame(hero, bg="#0d0f13")
             empty.place(relx=.5, rely=.5, anchor="center")
@@ -458,7 +474,8 @@ class ModInfoWindow(Window):
         if url:
             return palmedia.parse_link(url).get("url", url)
         fields = {"source": self.source.get(), "id": self.vars["id"].get().strip()}
-        return palregistry.url_for(self.mod, {k: v for k, v in fields.items() if v})
+        return (palregistry.url_for(self.mod, {k: v for k, v in fields.items() if v})
+                or (self.entry.get("url") if self.entry.get("workshop") else None))
 
     def _refresh_page_button(self):
         url = self._page_url()
@@ -474,6 +491,8 @@ class ModInfoWindow(Window):
 
     # ------------------------------------------------------------ install info
     def _build_install(self, meta):
+        if self.entry.get("workshop"):
+            return self._build_workshop()
         rec = palregistry.receipt(self.kind, self.mod)
         lines = []
         if meta.get("installed"):
@@ -495,6 +514,21 @@ class ModInfoWindow(Window):
                           self.app.f_small, (8, 2))
             show.configure(bg=SURFACE)
             show.pack(side="right")
+
+    def _build_workshop(self):
+        w = self.entry["workshop"]
+        self.section("On disk")
+        self.note(f"Subscribed on the Steam Workshop as {w['name']}. Steam keeps "
+                  f"it up to date, and Palworld copies it into the game when it "
+                  f"starts. To remove it, unsubscribe on its Workshop page.")
+        row = tk.Frame(self.body, bg=SURFACE)
+        row.pack(fill="x", padx=22, pady=(0, 16))
+        tk.Label(row, text=w["path"], bg=SURFACE, fg=FAINT, font=self.app.f_small,
+                 anchor="w", wraplength=600, justify="left").pack(side="left")
+        show = button(row, "Show", lambda: open_in_explorer(w["path"]), "ghost",
+                      self.app.f_small, (8, 2))
+        show.configure(bg=SURFACE)
+        show.pack(side="right")
 
     # ------------------------------------------------------------ saving
     def _snapshot(self):

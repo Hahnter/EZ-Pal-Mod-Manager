@@ -216,14 +216,28 @@ def lua_mod(mods_dir, name, main="print('x')", enabled=True, extra=None):
     return d
 
 
-def write_log(win64, started, when_offset=0):
-    log = Path(win64) / "ue4ss/UE4SS.log"
-    lines = ["[2026-09-12 10:00:00.0] UE4SS - v3.0.1 Beta #0 - Git SHA #abc"]
-    lines += [f"[2026-09-12 10:00:01.0] Starting Lua mod '{n}'" for n in started]
-    log.write_text("\n".join(lines) + "\n")
+def ue4ss_log(log, started, when_offset=0, extra=()):
+    """A UE4SS.log for one run that started the named mods, plus any `extra`
+    lines.
+
+    Each run is stamped with the time it happened, as UE4SS stamps its lines,
+    so two runs are told apart the way the app tells real ones apart.
+    """
+    from datetime import datetime
     t = time.time() + when_offset
+    stamp = datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S.%f")
+    lines = [f"[{stamp}] UE4SS - v3.0.1 Beta #0 - Git SHA #abc"]
+    lines += [f"[{stamp}] Starting Lua mod '{n}'" for n in started]
+    lines += [f"[{stamp}] {x}" for x in extra]
+    log = Path(log)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("\n".join(lines) + "\n")
     os.utime(log, (t, t))
     return log
+
+
+def write_log(win64, started, when_offset=0):
+    return ue4ss_log(Path(win64) / "ue4ss/UE4SS.log", started, when_offset)
 
 
 def picture(path, size=(800, 450), mode="RGB", fmt=None, colour=(40, 120, 200, 255)):

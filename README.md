@@ -39,6 +39,26 @@ name, size and source before anything is downloaded, and nothing is fetched
 until you press the button. This is the only part of the app that uses the
 network; see *Privacy and security* below. Pak mods are still managed without UE4SS; they don't need it.
 
+**Works with the Steam Workshop.** Since v0.7, Palworld installs mods from the
+Steam Workshop itself. Those get their own *Steam Workshop mods* group, with
+each mod's own name, picture and Workshop page. Their switches are the game's
+own: the app changes `Mods\PalModSettings.ini` the same way **Options →
+Mod Management** does, by the mod's `ActiveModList` line, and only while
+Palworld is closed (it keeps its own copy of that list while it runs). The
+game's copies of Workshop mods, in `Mods\NativeMods` and the paks folders, are
+never moved, renamed or deleted by the app: installs leave them out, Clean up
+never lists them, and removing a Workshop mod means unsubscribing on Steam.
+Otherwise they're checked like any other mod: whether they started, the mods
+they depend on, file conflicts with your other paks, hotkeys, and game updates.
+
+UE4SS from the Workshop is recognised as such. A game whose only UE4SS is the
+Workshop's isn't told UE4SS is missing, and **Install UE4SS** won't put a second
+copy beside it. If UE4SS is set up both by hand and from the Workshop, the app
+says so, because Palworld loads both, which can load mods twice or crash the
+game; it explains how to keep one. A dedicated server, which has no Mod
+Management menu, gets a banner when its settings name Workshop mods without
+saying which folder they're in, and *Choose folder…* sets it.
+
 **Installs mods.** Point it at a `.zip`, `.7z`, `.rar`, a folder, or a bare
 `.pak`. It reads what's inside, works out where each piece goes, and shows you
 that before writing anything:
@@ -167,7 +187,8 @@ to be fine.
 
 **Nothing leaves your PC.** No account, no telemetry, no analytics. Everything
 the app records (sources, links, pictures, descriptions, receipts, backups)
-stays in `%LOCALAPPDATA%\PalModManager`. The one exception is **Install
+stays in `%LOCALAPPDATA%\PalModManager`. Steam Workshop mods are read from the
+files Steam already downloaded; the app never contacts Steam. The one exception is **Install
 UE4SS / PalSchema**: when you press it, the app asks GitHub for the current
 release and downloads it, and that request carries no information about you
 beyond what any download does.
@@ -203,7 +224,8 @@ All under **…**:
   lists instead of hand-typed pak names.
 - **Clean up leftovers**: configs for mods that are gone, orphaned `.ucas`/
   `.utoc` files, empty mod folders, and UE4SS copies parked by Repair.
-  Everything goes to the Recycle Bin.
+  Everything goes to the Recycle Bin. What Palworld put there for Steam
+  Workshop mods is never on the list.
 - **Share modlist**: copy your enabled mods as text for Discord, export them
   to a file, or open a friend's file to see what you're missing (with links),
   what you have switched off, and what you run that they don't. *Match their
@@ -230,6 +252,11 @@ set of pictures.
 | **on** | A pak mod that's switched on. Pak mods never write to the log, so whether it works can only be seen in game. |
 | **wrong folder** | The pak's own contents say it belongs in another folder; the row says which. |
 | **needs PalSchema** / **PalSchema off** | A PalSchema mod whose framework isn't installed or switched on. |
+| **can't start** | A Steam Workshop mod missing something it runs in, such as the Workshop's UE4SS or PalSchema; the row says what. |
+| **needs another mod** | A Steam Workshop mod depending on one you aren't subscribed to, or have switched off. |
+| **mods off in game** | On in the game's list, but every mod is switched off in Palworld's Mod Management. A banner offers *Switch on*. |
+| **can't read** | A Steam Workshop item whose `Info.json` can't be read. The game can't load it either. |
+| **for servers only** / **for the game only** | A Steam Workshop item with nothing to install here. |
 
 Rows keep to the essentials: the switch, the name, a link to the mod's page
 when there is one, and its state. The mod's type, folder and version are in its
@@ -274,7 +301,9 @@ python palmods.py export --text             # your modlist, ready to paste
 
 A plain name is enough unless two kinds of mod share it. Then `enable`,
 `disable` and `uninstall` change nothing and print the commands that pick each
-one, using `ue4ss:<name>`, `pak:<name>` or `palschema:<name>`.
+one, using `ue4ss:<name>`, `pak:<name>`, `palschema:<name>` or
+`workshop:<name>`. A Steam Workshop mod goes by its package name, as its
+`ActiveModList` line has it.
 
 ## Doctor
 
@@ -335,13 +364,14 @@ offered there because it could never apply before the next launch anyway.
 | `palmods.py` | Scanning, log parsing, pak reading, toggling, config editing |
 | `palpaths.py` | Finding Palworld; settings and data locations |
 | `palinstall.py` | Archive inspection, install, uninstall, scaffolding |
+| `palworkshop.py` | Palworld's own mod loader: `PalModSettings.ini`, Workshop packages, its UE4SS |
 | `palregistry.py` | Mod sources, install receipts, profiles |
 | `palsafety.py` | Build tracking, pak conflicts, hotkeys, save backups, launching |
 | `paltools.py` | Leftovers, load order, modlists, log classification |
 | `palwindows.py` | Log, conflicts, load order, backups, cleanup, compare, session windows |
 | `palui.py` | Shared palette, fonts and widgets (switch, buttons, themed scrollbar) |
 | `palicons.py` | Icons and the app mark, drawn in code; no image files |
-| `paltext.py` | Wording helpers (`plural`) |
+| `paltext.py` | Wording helpers (`plural`, `and_list`) |
 | `palget.py` | Downloading UE4SS and PalSchema from their GitHub releases |
 | `palmedia.py` | Mod descriptions and pictures: clipboard, files, archives, links |
 | `palinfo.py` | The mod info window and picture viewer |

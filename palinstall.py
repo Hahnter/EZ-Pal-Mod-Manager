@@ -23,7 +23,7 @@ import zipfile
 from pathlib import Path
 
 import palmedia
-from paltext import plural
+from paltext import and_list, plural
 import palmods
 import palpaths
 import palregistry
@@ -303,6 +303,10 @@ def inspect(source, game_paths=None):
     _, dest_schema, schema_off = palmods.palschema_dirs(paths)
 
     components, claimed, warnings = [], set(), []
+    # In the UE4SS Palworld installs from the Steam Workshop, the game keeps
+    # copies of Workshop mods. Those are never written over from here.
+    in_workshop = palmods.in_workshop_ue4ss(paths, dest_ue4ss)
+    theirs = []
 
     # --- UE4SS mods ----------------------------------------------------
     for mod_root, kind in _ue4ss_roots(tmp).items():
@@ -310,6 +314,9 @@ def inspect(source, game_paths=None):
         name = mod_root.name if mod_root != tmp else src.stem
         files = [p for p in _iter_files(mod_root)]
         claimed.update(files)
+        if in_workshop and palmods.workshop_owns(paths, "ue4ss", name):
+            theirs.append(name)
+            continue
         components.append({
             "kind": UE4SS_MOD, "name": name, "lang": kind,
             "dest": dest_ue4ss / name, "root": mod_root,
@@ -324,6 +331,10 @@ def inspect(source, game_paths=None):
         if not files:
             continue
         claimed.update(files)
+        if palmods.in_workshop_ue4ss(paths, dest_schema) \
+                and palmods.workshop_owns(paths, "palschema", name):
+            theirs.append(name)
+            continue
         components.append({
             "kind": PALSCHEMA, "name": name, "lang": "json",
             "dest": dest_schema / name, "root": schema_root,
@@ -365,6 +376,9 @@ def inspect(source, game_paths=None):
                 files.append((mate, target_dir / mate.name))
                 claimed.add(mate)
         claimed.add(p)
+        if folder == "LogicMods" and palmods.workshop_owns(paths, "logic", stem):
+            theirs.append(stem)
+            continue
         components.append({
             "kind": LOGIC_PAK if folder == "LogicMods" else CONTENT_PAK,
             "name": stem, "lang": f"pak v{info.get('version')}",
@@ -372,6 +386,23 @@ def inspect(source, game_paths=None):
             "note": desc if not info.get("error") else info["error"],
         })
 
+    if theirs:
+        one = len(theirs) == 1
+        warnings.append(
+            f"{and_list(theirs)} {'comes' if one else 'come'} from the "
+            f"Steam Workshop here, and Palworld keeps {'its' if one else 'their'} "
+            f"files itself, so {'it was' if one else 'they were'} left out. "
+            f"Updates come from the Workshop.")
+    into_workshop = [c["name"] for c in components
+                     if c["kind"] in (UE4SS_MOD, PALSCHEMA) and in_workshop]
+    if into_workshop:
+        one = len(into_workshop) == 1
+        warnings.append(
+            f"UE4SS here is the one Palworld installs from the Steam Workshop, "
+            f"so {', '.join(into_workshop)} {'goes' if one else 'go'} into its "
+            f"folder and {'loads' if one else 'load'} from there. Palworld "
+            f"manages that folder: if a Workshop update to UE4SS ever removes "
+            f"{'it' if one else 'them'}, install {'it' if one else 'them'} again.")
     needs_ue4ss = [c["name"] for c in components
                    if c["kind"] in (UE4SS_MOD, LOGIC_PAK, PALSCHEMA)]
     if needs_ue4ss and not palmods.ue4ss_status(paths)["installed"]:
@@ -392,6 +423,8 @@ def inspect(source, game_paths=None):
         "tmp": tmp, "source": src, "game": game, "components": components,
         "warnings": warnings, "skipped": skipped,
         "total_files": sum(len(c["files"]) for c in components),
+        # Where whether they start will show, for "starts next launch".
+        "log": paths["log"],
     }
 
 
@@ -625,7 +658,8 @@ def apply(plan, components=None, enable=True, backup=True, link=None):
     # the game runs, the list says they start next launch.
     if enable and installed:
         try:
-            palsafety.switched_on(game, [component_id(c) for c in installed])
+            palsafety.switched_on(game, [component_id(c) for c in installed],
+                                  plan.get("log"))
         except OSError:
             pass
     return results
@@ -675,7 +709,7 @@ def uninstall(name, mod_path=None, pak_path=None, kind=None):
     """Delete a mod. A receipt makes this exact; without one we fall back.
 
     `kind` ("ue4ss", "pak" or "palschema") says which mod is meant when two
-    kinds share the name. Without it the receipts decide, and a name with
+    kinds share the name. A Steam Workshop mod ("workshop") is refused. Without it the receipts decide, and a name with
     receipts for two kinds is refused. Whatever a receipt says, nothing
     outside the game folder in use is touched.
 
@@ -683,6 +717,11 @@ def uninstall(name, mod_path=None, pak_path=None, kind=None):
     a shared folder -- guessing wrongly here deletes someone else's mod.
     """
     game = palmods.game_root()
+    if kind == "workshop":
+        # Steam and the game own those files. Unsubscribing removes them.
+        raise InstallError(f"'{name}' is a Steam Workshop mod. Unsubscribe from "
+                           f"it on its Workshop page, and Steam and Palworld "
+                           f"remove it.")
     if kind is None:
         kinds = palregistry.receipt_kinds(name, game)
         if len(kinds) > 1:
