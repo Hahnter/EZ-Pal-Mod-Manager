@@ -53,7 +53,7 @@ cfg = win64 / "ue4ss/Mods/SpeedMod/config.json"
 check("installed with the mod's own settings",
       json.loads(cfg.read_text())["Speed"] == 2)
 check("the receipt remembers what was shipped",
-      str(cfg) in palregistry.shipped_hashes("SpeedMod"))
+      str(cfg) in palregistry.shipped_hashes("ue4ss", "SpeedMod"))
 
 cfg.write_text(json.dumps({"Speed": 9, "Sound": False}))      # the user edits
 plan = palinstall.inspect(mod_zip("v2", 5, main="print(2)"))
@@ -206,7 +206,7 @@ plan = palinstall.inspect(mod_zip("v5", 3))
 palinstall.apply(plan)
 palinstall.discard(plan)
 cfg.write_text(json.dumps({"Speed": 9, "Sound": False}))
-receipt_files = palregistry.receipt("SpeedMod")["files"]
+receipt_files = palregistry.receipt("ue4ss", "SpeedMod")["files"]
 schema = mods_dir / "PalSchema"
 (schema / "dlls").mkdir(parents=True)
 (schema / "dlls/main.dll").write_bytes(b"palschema")

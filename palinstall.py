@@ -36,6 +36,17 @@ PALSCHEMA = "PalSchema"
 LOGIC_PAK = "blueprint pak"
 CONTENT_PAK = "content pak"
 
+
+def mod_kind(component):
+    """The kind of mod a component becomes once installed (palregistry.KINDS)."""
+    return {UE4SS_MOD: "ue4ss", PALSCHEMA: "palschema"}.get(component["kind"], "pak")
+
+
+def component_id(component):
+    """'ue4ss:Hybrid': the component as the rest of the app addresses it."""
+    return palregistry.mod_id(mod_kind(component), component["name"])
+
+
 # Junk that some archives carry and nothing should install.
 SKIP_NAMES = {"__macosx", ".ds_store", "thumbs.db", "desktop.ini"}
 
@@ -89,6 +100,22 @@ def inside(path, folder):
     try:
         return Path(path).resolve().is_relative_to(Path(folder).resolve())
     except (OSError, ValueError):
+        return False
+
+
+def in_install(path, game):
+    """Whether `path`, as recorded, is inside the game folder `game`.
+
+    Guards everything that acts on a receipt: a receipt naming another
+    install's files must never reach them. Links are not followed, unlike
+    inside(), because a mod folder that is a junction to another drive still
+    belongs to the install it was put in.
+    """
+    try:
+        p = os.path.normcase(os.path.abspath(path))
+        g = os.path.normcase(os.path.abspath(game))
+        return p != g and os.path.commonpath([p, g]) == g
+    except (OSError, TypeError, ValueError):
         return False
 
 
@@ -250,8 +277,9 @@ def inspect(source, game_paths=None):
     """Unpack to a temp folder and work out what would be installed where.
 
     Returns a plan:
-        {tmp, source, components[], files[], warnings[], skipped[]}
-    where each component is one installable thing with its own destination.
+        {tmp, source, game, components[], files[], warnings[], skipped[]}
+    where each component is one installable thing with its own destination,
+    and `game` is the install those destinations are in.
     The caller is responsible for calling discard(plan) or apply(plan).
     """
     src = Path(source)
@@ -267,7 +295,7 @@ def inspect(source, game_paths=None):
         shutil.rmtree(tmp, ignore_errors=True)
         raise
 
-    game = palmods.game_root()
+    game = paths["game"]
     dest_ue4ss = paths["ue4ss_mods"]
     dest_logic = game / "Pal" / "Content" / "Paks" / "LogicMods"
     dest_mods = game / "Pal" / "Content" / "Paks" / "~mods"
@@ -358,19 +386,19 @@ def inspect(source, game_paths=None):
             "should contain a .pak.")
 
     return {
-        "tmp": tmp, "source": src, "components": components,
+        "tmp": tmp, "source": src, "game": game, "components": components,
         "warnings": warnings, "skipped": skipped,
         "total_files": sum(len(c["files"]) for c in components),
     }
 
 
 def conflicts(plan):
-    """Existing files a plan would overwrite, per component."""
+    """Existing files a plan would overwrite, by component_id()."""
     out = {}
     for c in plan["components"]:
         hits = [dst for _, dst in c["files"] if dst.exists()]
         if hits:
-            out[c["name"]] = hits
+            out[component_id(c)] = hits
     return out
 
 
@@ -450,12 +478,16 @@ def apply(plan, components=None, enable=True, backup=True, link=None):
     """
     chosen = components if components is not None else plan["components"]
     page = link_fields(link)
+    # Receipts belong to the install the plan was made for, even if the app
+    # has switched to another one since.
+    game = plan.get("game") or palmods.game_root()
     results = []
     for c in chosen:
+        kind = mod_kind(c)
         written, replaced, kept = [], 0, []
-        shipped_before = palregistry.shipped_hashes(c["name"])
+        shipped_before = palregistry.shipped_hashes(kind, c["name"], game)
         before = [Path(f) for f in
-                  (palregistry.receipt(c["name"]) or {}).get("files", [])]
+                  (palregistry.receipt(kind, c["name"], game) or {}).get("files", [])]
         shipped = {}
         for src, dst in c["files"]:
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -497,11 +529,12 @@ def apply(plan, components=None, enable=True, backup=True, link=None):
         # An update usually ships fewer files than the last version wrote --
         # and never rewrites enabled.txt. Carry the old receipt's survivors
         # forward, or uninstall leaves them behind and the folder stays.
+        # Only this install's: a path in another install is never adopted.
         for old in before:
-            if old.exists() and old not in written:
+            if old.exists() and old not in written and in_install(old, game):
                 written.append(old)
-        palregistry.save_receipt(c["name"], written, roots=[c["dest"]],
-                                 shipped=shipped)
+        palregistry.save_receipt(kind, c["name"], written, roots=[c["dest"]],
+                                 shipped=shipped, game=game)
         palregistry.record_install(
             c["name"], archive=plan["source"],
             extra={"kind": c["kind"], "installed_from": str(plan["source"])})
@@ -553,18 +586,34 @@ def discard(plan):
 # --------------------------------------------------------------------------
 # removal
 # --------------------------------------------------------------------------
-def uninstall(name, mod_path=None, pak_path=None):
+def uninstall(name, mod_path=None, pak_path=None, kind=None):
     """Delete a mod. A receipt makes this exact; without one we fall back.
+
+    `kind` ("ue4ss", "pak" or "palschema") says which mod is meant when two
+    kinds share the name. Without it the receipts decide, and a name with
+    receipts for two kinds is refused. Whatever a receipt says, nothing
+    outside the game folder in use is touched.
 
     The fallback only ever removes the mod's own folder or its own .pak, never
     a shared folder -- guessing wrongly here deletes someone else's mod.
     """
+    game = palmods.game_root()
+    if kind is None:
+        kinds = palregistry.receipt_kinds(name, game)
+        if len(kinds) > 1:
+            raise InstallError(f"'{name}' is {palmods.describe_kinds(kinds)} "
+                               f"here. Say which one to remove.")
+        kind = kinds[0] if kinds else None
     removed, notes = [], []
-    rec = palregistry.receipt(name)
+    rec = palregistry.receipt(kind, name, game) if kind else None
 
     if rec:
+        elsewhere = 0
         for f in rec.get("files", []):
             p = Path(f)
+            if not in_install(p, game):
+                elsewhere += 1
+                continue
             # A receipted file may have been renamed since: disabling a mod
             # moves enabled.txt aside, and saving a config leaves a backup.
             # Missing those left the folder non-empty and so undeletable.
@@ -582,26 +631,35 @@ def uninstall(name, mod_path=None, pak_path=None):
         # with Scripts/ would otherwise never be fully removed.
         for r in rec.get("roots", []):
             root = Path(r)
+            if not in_install(root, game):
+                continue
             if root.is_dir() and not any(f.is_file() for f in root.rglob("*")):
                 shutil.rmtree(root, ignore_errors=True)
             elif root.is_dir():
                 notes.append(f"kept {root.name}: files remain that we did not install")
-        palregistry.drop_receipt(name)
+        if elsewhere:
+            notes.append(f"skipped {plural(elsewhere, 'file')} recorded outside "
+                         f"this install")
+        palregistry.drop_receipt(kind, name, game)
     else:
         notes.append("no install record - removing what is on disk")
-        if mod_path and Path(mod_path).is_dir():
+        if mod_path and Path(mod_path).is_dir() and in_install(mod_path, game):
             folder = Path(mod_path)
             removed += [p for p in folder.rglob("*") if p.is_file()]
             shutil.rmtree(folder, ignore_errors=True)
-        if pak_path and Path(pak_path).exists():
+        if pak_path and Path(pak_path).exists() and in_install(pak_path, game):
             p = Path(pak_path)
             for side in (p, p.with_suffix(".ucas"), p.with_suffix(".utoc")):
                 if side.is_file():
                     side.unlink()
                     removed.append(side)
 
-    palmedia.forget(name)
-    palregistry.forget(name)
+    # The page link, description and pictures are shared by every mod of this
+    # name: the other half of a hybrid mod, or the same mod in another
+    # install. They go with the last of them.
+    if not palregistry.receipts_for(name) and not palmods.kinds_of(name):
+        palmedia.forget(name)
+        palregistry.forget(name)
     return removed, notes
 
 
@@ -661,7 +719,8 @@ def scaffold(name, game_paths=None):
 
     written = [dest / "Scripts" / "main.lua", dest / "README.md",
                dest / "enabled.txt"]
-    palregistry.save_receipt(clean, written, roots=[dest])
+    palregistry.save_receipt("ue4ss", clean, written, roots=[dest],
+                             game=paths["game"])
     palregistry.set_entry(clean, source="local", name=clean, version="0.1.0",
                           released=None, kind=UE4SS_MOD,
                           url=str(dest), note="Created with EZ Pal Mod Manager.")

@@ -35,6 +35,34 @@
   names those mods. Installing UE4SS with 1.0.0 moved your mods into that
   folder, so it may hold your only copy of them.
 
+- Uninstalling a mod from the game also deleted a dedicated server's copy of
+  it, or the other way round, and left an empty folder behind there. Install
+  records were kept by mod name alone, for every install at once. They are now
+  kept per install. An uninstall also never deletes anything outside the game
+  folder in use, whatever its record says.
+- A hybrid mod whose Lua and PalSchema halves share a folder name was treated
+  as one mod. Switching off the PalSchema row switched off the Lua mod instead,
+  the install window showed one checkbox for both halves, and both halves
+  shared one install record. Each half now has its own row, switch, checkbox
+  and record.
+- The page link, description and pictures are still shared by every mod of a
+  name. Uninstalling one half of a hybrid mod, or the copy in one install,
+  keeps them for the rest.
+- The first time the app reads install records saved by an earlier version, it
+  sorts them by install and by kind of mod, splitting any record the bugs above
+  had merged. The original file is kept as `receipts-v1.json`.
+
+**Command line**
+
+- `enable`, `disable` and `uninstall` accept `ue4ss:<name>`, `pak:<name>` and
+  `palschema:<name>`. A plain name works as before unless two kinds of mod
+  share it. Then the command changes nothing and prints the commands that pick
+  each one.
+- `uninstall` can remove PalSchema mods.
+- Profiles record each mod with its kind, and ones saved from the command line
+  now include PalSchema mods, as the app's always did. Profiles saved earlier
+  still load; a plain name in one applies to every mod of that name.
+
 ## 1.0.0 - first public release
 
 **It can set up UE4SS and PalSchema for you**

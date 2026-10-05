@@ -82,7 +82,10 @@ class ModInfoWindow(Window):
     THUMB = (128, 72)
 
     def __init__(self, app, entry):
+        # Description, pictures and link are kept by name, so both halves of
+        # a hybrid mod show the same ones. What is on disk goes by kind too.
         self.mod = entry["name"]
+        self.kind = palregistry.split_id(entry["id"])[0]
         self.entry = entry
         meta = palregistry.get(self.mod)
         # The list rows stay lean; type, folder and version are shown here.
@@ -471,7 +474,7 @@ class ModInfoWindow(Window):
 
     # ------------------------------------------------------------ install info
     def _build_install(self, meta):
-        rec = palregistry.receipt(self.mod)
+        rec = palregistry.receipt(self.kind, self.mod)
         lines = []
         if meta.get("installed"):
             lines.append(f"Installed {meta['installed']}"

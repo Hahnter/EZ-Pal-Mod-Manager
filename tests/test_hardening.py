@@ -221,9 +221,9 @@ for label, fname, add, names in (
          lambda n: palregistry.set_entry(n, source="Nexus", id=1000),
          lambda: set(palregistry.load_registry())),
         ("receipts", "receipts.json",
-         lambda n: palregistry.save_receipt(n, [SB / f"{n}.lua"]),
+         lambda n: palregistry.save_receipt("ue4ss", n, [SB / f"{n}.lua"]),
          lambda: {n for n in [f"Mod{i}" for i in range(40)] + ["NewMod"]
-                  if palregistry.receipt(n)}),
+                  if palregistry.receipt("ue4ss", n)}),
         ("profiles", "profiles.json",
          lambda n: palregistry.save_profile(n, ["A"], ["A", "B"]),
          lambda: set(palregistry.profile_names()))):

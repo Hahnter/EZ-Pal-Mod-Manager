@@ -72,10 +72,6 @@ def _save_state(state):
     palpaths.write_json(_state_file(), state)
 
 
-def _install_key(game):
-    return str(Path(game)).lower().rstrip("\\/")
-
-
 EARLIER = "earlier"      # a run we saw, on a build that was already replaced
 
 
@@ -92,7 +88,7 @@ def observe(paths, data):
     cur = data.get("build") or build_info(game)
     state = _load_state()
     installs = state.setdefault("installs", {})
-    st = installs.setdefault(_install_key(game), {})
+    st = installs.setdefault(palpaths.install_key(game), {})
     verified = st.setdefault("verified", {})
     labels = st.setdefault("labels", {})
     labels[cur["id"]] = cur["label"]
@@ -457,7 +453,7 @@ def save_dir(game):
 
 
 def _backup_root(game):
-    tag = hashlib.sha1(_install_key(game).encode()).hexdigest()[:10]
+    tag = hashlib.sha1(palpaths.install_key(game).encode()).hexdigest()[:10]
     d = palpaths.data_dir() / "backups" / tag
     d.mkdir(parents=True, exist_ok=True)
     return d

@@ -39,7 +39,7 @@ check("row thumbnail slot shown once any mod has a picture", app._any_cover)
 check("thumbnail image built for MiniMap row", any(v for v in app._thumbs.values()))
 
 app._filter.set("chest markers"); app._apply_filter(); pump(0.1)
-visible = [n for n, r in app.rows.items() if r["frame"].winfo_manager()]
+visible = [r["entry"]["name"] for r in app.rows.values() if r["frame"].winfo_manager()]
 check("search matches description text", visible == ["MiniMap"], visible)
 app._filter.set(""); app._apply_filter()
 
