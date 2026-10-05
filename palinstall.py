@@ -271,7 +271,7 @@ def inspect(source, game_paths=None):
     dest_ue4ss = paths["ue4ss_mods"]
     dest_logic = game / "Pal" / "Content" / "Paks" / "LogicMods"
     dest_mods = game / "Pal" / "Content" / "Paks" / "~mods"
-    dest_schema = dest_ue4ss / "PalSchema" / "mods"
+    _, dest_schema, schema_off = palmods.palschema_dirs(paths)
 
     components, claimed, warnings = [], set(), []
 
@@ -298,6 +298,8 @@ def inspect(source, game_paths=None):
         components.append({
             "kind": PALSCHEMA, "name": name, "lang": "json",
             "dest": dest_schema / name, "root": schema_root,
+            # Where its folder is moved to while it is switched off.
+            "dest_off": schema_off / name,
             "files": [(p, dest_schema / name / p.relative_to(schema_root))
                       for p in files],
             "note": "PalSchema patch - needs the PalSchema mod installed",
@@ -369,6 +371,12 @@ def conflicts(plan):
     out = {}
     for c in plan["components"]:
         hits = [dst for _, dst in c["files"] if dst.exists()]
+        if c["kind"] == PALSCHEMA and not c["dest"].exists():
+            # Switched off, it is in disabled-mods, and those are the files
+            # an update replaces.
+            off = [c["dest_off"] / dst.relative_to(c["dest"])
+                   for _, dst in c["files"]]
+            hits = [p for p in off if p.exists()]
         if hits:
             out[c["name"]] = hits
     return out
@@ -440,6 +448,17 @@ def _keep_users_copy(dst, src, shipped):
     return now != _digest(src)
 
 
+def _as_shipped(folder, dest, shipped):
+    """Whether every file in `folder` is exactly what the mod shipped to the
+    same place in `dest`, which leaves nothing in it that is the user's own."""
+    for f in Path(folder).rglob("*"):
+        if f.is_file():
+            was = shipped.get(str(dest / f.relative_to(folder)))
+            if not was or was != _digest(f):
+                return False
+    return True
+
+
 def apply(plan, components=None, enable=True, backup=True, link=None):
     """Install the chosen components. Returns a list of human-readable results.
 
@@ -450,12 +469,34 @@ def apply(plan, components=None, enable=True, backup=True, link=None):
     """
     chosen = components if components is not None else plan["components"]
     page = link_fields(link)
-    results = []
+    results, installed = [], []
     for c in chosen:
         written, replaced, kept = [], 0, []
         shipped_before = palregistry.shipped_hashes(c["name"])
         before = [Path(f) for f in
                   (palregistry.receipt(c["name"]) or {}).get("files", [])]
+        if c["kind"] == PALSCHEMA and c["dest_off"].is_dir():
+            # A switched-off PalSchema mod is in disabled-mods. Installing
+            # beside it left two copies that could be switched neither on nor
+            # off. It moves back to be updated like any other mod, which keeps
+            # your settings in it, and `enable` then decides where it ends up.
+            on, off = c["dest"], c["dest_off"]
+            if on.exists():
+                # Two copies already, left by an earlier version. A copy that
+                # is still exactly as the mod shipped holds nothing of yours.
+                if _as_shipped(on, on, shipped_before):
+                    shutil.rmtree(on)
+                elif _as_shipped(off, on, shipped_before):
+                    shutil.rmtree(off)
+                else:
+                    results.append(
+                        f"Skipped {c['name']}: it is in both PalSchema\\mods and "
+                        f"PalSchema\\{palmods.PALSCHEMA_OFF}. Delete the copy "
+                        f"you don't want, then install it again.")
+                    continue
+            if off.is_dir():
+                on.parent.mkdir(parents=True, exist_ok=True)
+                off.rename(on)
         shipped = {}
         for src, dst in c["files"]:
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -500,6 +541,14 @@ def apply(plan, components=None, enable=True, backup=True, link=None):
         for old in before:
             if old.exists() and old not in written:
                 written.append(old)
+        # Switched off, a PalSchema mod's folder goes to disabled-mods. That
+        # comes last, once the survivors are found where the receipt says.
+        # The receipt names mods\ either way, as after switching it off later.
+        where = c["dest"]
+        if c["kind"] == PALSCHEMA and not enable:
+            where = c["dest_off"]
+            where.parent.mkdir(parents=True, exist_ok=True)
+            c["dest"].rename(where)
         palregistry.save_receipt(c["name"], written, roots=[c["dest"]],
                                  shipped=shipped)
         palregistry.record_install(
@@ -516,23 +565,24 @@ def apply(plan, components=None, enable=True, backup=True, link=None):
                 except OSError:
                     pass
         results.append(
-            f"{c['name']}: {plural(len(written), 'file')} -> {c['dest']}"
+            f"{c['name']}: {plural(len(written), 'file')} -> {where}"
             + (f"  ({replaced} replaced, backups kept)" if replaced else ""))
         if kept:
             results.append(
                 f"Kept your settings in {', '.join(kept)}. The new version of "
                 f"{'each' if len(kept) > 1 else 'it'} is beside it as .new")
+        installed.append(c)
 
     # README and pictures that shipped loose in the download are not mod
     # files, but they are exactly the description and screenshots people want.
-    if chosen and plan.get("skipped"):
-        got = palmedia.capture_from_archive([c["name"] for c in chosen],
+    if installed and plan.get("skipped"):
+        got = palmedia.capture_from_archive([c["name"] for c in installed],
                                             plan["tmp"], plan["skipped"])
         if got["description"] or got["images"]:
             bits = ((["description"] if got["description"] else [])
                     + ([plural(got['images'], 'picture')] if got["images"] else []))
             results.append("Kept from the download: " + " and ".join(bits))
-    if page and chosen:
+    if page and installed:
         results.append("Linked to " + describe_link(page))
     return results
 
