@@ -1,88 +1,97 @@
 # Changelog
 
-## Unreleased
+## 1.1.0
 
-**Fixes**
+**Installing UE4SS keeps your mods**
 
-- Two copies of the repo (git worktrees) can run the tests at the same time.
-  Before, every copy built its throwaway installs in one shared temp folder,
-  so one run could delete an install another run was still using. Each copy
-  now has its own folder. Installs in it that no test has rebuilt for a week
-  are deleted.
-
-**Fixes**
-
-- Installing UE4SS over an existing `ue4ss` folder moved your mods aside
-  with the old UE4SS, into `ue4ss.pmm-old-<date>`. The main list then showed
-  only UE4SS's built-in mods. Now everything in `ue4ss\Mods` comes back into
-  the new UE4SS at the same paths: your mods and their settings, PalSchema
-  with its mods (on and off), BPModLoaderMod's `load_order.txt` (the new
-  release's copy lands beside it as `.new`), and which mods are on in
-  `mods.txt` and `mods.json`. Entries the new release adds to those two
-  lists are added to yours. The install says what it kept.
+- Installing or updating UE4SS used to move your mods aside with the old
+  UE4SS, into `ue4ss.pmm-old-<date>`, and the main list then showed only
+  UE4SS's own mods. Now everything in `ue4ss\Mods` comes across to the new
+  UE4SS at the same paths: your mods and their settings, PalSchema with its
+  mods (on and off), BPModLoaderMod's `load_order.txt` (the release's copy
+  lands beside it as `.new`), and which mods are on in `mods.txt` and
+  `mods.json`. Mods the new release adds to those lists are added to yours.
+  The install says what it kept.
 - `ue4ss.pmm-old-<date>` still holds the whole old UE4SS, so you can go back
-  to it. Removing it with **Clean up leftovers** no longer removes your only
-  copy of your mods.
+  to it, and removing it no longer removes your only copy of your mods.
 - If installing UE4SS stops part way, the old one is put back as it was.
-- If your mods disappeared after installing UE4SS with 1.0.0, they are in
-  `Pal\Binaries\Win64\ue4ss.pmm-old-<date>\Mods`. Copy your mod folders from
-  there back into `ue4ss\Mods`.
+- **If your mods disappeared after installing UE4SS with 1.0.0**, they are in
+  `Pal\Binaries\Win64\ue4ss.pmm-old-<date>\Mods`. **Clean up leftovers**
+  now marks that folder *old UE4SS with mods* and names the mods in it that
+  aren't installed. Copy those folders back into `ue4ss\Mods`.
 
-**Fixes**
+**Uninstall removes only what it should**
 
-- When an old UE4SS folder (`ue4ss.pmm-old-<date>`) holds mods that aren't
-  installed now, **Clean up leftovers** labels it *old UE4SS with mods* and
-  names those mods. Installing UE4SS with 1.0.0 moved your mods into that
-  folder, so it may hold your only copy of them.
+- Uninstalling a mod from the game also deleted a dedicated server's copy, or
+  the other way round. Install records are now kept per install, and an
+  uninstall never deletes anything outside the game folder in use.
+- Uninstalling a pak deleted the whole `~mods` or `LogicMods` folder when it
+  was the last pak there, and otherwise said "kept ~mods: files remain that we
+  did not install". Every pak shares those folders, so now just the pak goes.
+- Uninstalling a PalSchema mod you had switched off removed nothing and said
+  "0 files". It's now found in `PalSchema\disabled-mods` and removed.
 
-- Uninstalling a mod from the game also deleted a dedicated server's copy of
-  it, or the other way round, and left an empty folder behind there. Install
-  records were kept by mod name alone, for every install at once. They are now
-  kept per install. An uninstall also never deletes anything outside the game
-  folder in use, whatever its record says.
-- A hybrid mod whose Lua and PalSchema halves share a folder name was treated
-  as one mod. Switching off the PalSchema row switched off the Lua mod instead,
-  the install window showed one checkbox for both halves, and both halves
-  shared one install record. Each half now has its own row, switch, checkbox
-  and record.
-- The page link, description and pictures are still shared by every mod of a
-  name. Uninstalling one half of a hybrid mod, or the copy in one install,
-  keeps them for the rest.
-- The first time the app reads install records saved by an earlier version, it
-  sorts them by install and by kind of mod, splitting any record the bugs above
-  had merged. The original file is kept as `receipts-v1.json`.
+**Mods that share a name**
+
+- A hybrid mod's Lua and PalSchema halves often share a folder name, and were
+  treated as one mod: switching off the PalSchema row switched off the Lua
+  mod, and the install window showed one checkbox for both. Each half now has
+  its own row, switch, checkbox and install record. They still share one page
+  link, description and set of pictures.
+- Install records saved by 1.0.0 are sorted by install and kind of mod the
+  first time this version reads them. The original file is kept as
+  `receipts-v1.json`.
+
+**PalSchema mods**
+
+- Updating a PalSchema mod while it was switched off left a copy in both
+  `mods` and `disabled-mods`, and it could then be switched neither on nor
+  off. The update now replaces the copy you have and keeps your settings.
+- PalSchema mods follow *Turn on after installing*, like other mods. Before,
+  they were always installed switched on.
+- Where 1.0.0 already left two copies, installing the mod again removes the
+  one that is exactly as installed. If both have changes, the install skips
+  the mod and asks you to delete one.
+
+**Your records survive a crash**
+
+- Settings, mod sources, install records, profiles and build tracking are
+  saved to a new file and swapped in whole, so a crash or power cut can't
+  leave half a file. The version before is kept as `<name>.bak`. A file that
+  won't read is never written over: it is kept as `<name>.corrupt-<time>` and
+  the `.bak` is used instead. Before, one interrupted save could empty the
+  whole file.
+- UE4SS's `mods.txt` and `mods.json`, and settings saved from **Configure**,
+  are written the same way.
+
+**Errors are reported, not lost**
+
+- If something goes wrong in the app, it says so and writes the details to
+  `error.log` in the app's data folder. Before, a failing button just did
+  nothing. *Copy details* puts the report on the clipboard for a bug report.
+  Your home folder appears in it as `%USERPROFILE%`, so your Windows user name
+  stays out of anything you share.
 
 **Command line**
 
 - `enable`, `disable` and `uninstall` accept `ue4ss:<name>`, `pak:<name>` and
   `palschema:<name>`. A plain name works as before unless two kinds of mod
-  share it. Then the command changes nothing and prints the commands that pick
-  each one.
-- `uninstall` can remove PalSchema mods.
-- Profiles record each mod with its kind, and ones saved from the command line
-  now include PalSchema mods, as the app's always did. Profiles saved earlier
-  still load; a plain name in one applies to every mod of that name.
+  share it; then nothing is changed and the commands that pick each are shown.
+- `uninstall` can remove PalSchema mods, and profiles saved from the command
+  line include them. Profiles saved by 1.0.0 still load.
 
-- Uninstalling a pak deleted the whole `~mods` or `LogicMods` folder when
-  nothing else was left in it. While other paks were still there, it showed
-  "kept ~mods: files remain that we did not install" instead. Every pak
-  shares those folders, so an uninstall now removes just that pak's files and
-  leaves the folder alone. This also applies to paks installed by earlier
-  versions.
+**Build**
 
-- Updating a PalSchema mod while it was switched off put the new version in
-  `PalSchema\mods` and left the old one in `PalSchema\disabled-mods`. With a
-  copy in both folders, the mod could no longer be switched on or off. The
-  update now replaces the copy you have and keeps your settings in it, the
-  same way as for other mods.
-- PalSchema mods now follow *Turn on after installing*. With it unticked, the
-  mod is installed switched off; before, it was switched on either way. With
-  it ticked (the default), updating a switched-off mod turns it back on, as it
-  already did for UE4SS mods.
-- If an earlier version already left two copies, installing the mod again
-  removes the copy that is still exactly as it was installed and updates the
-  other one. If both copies have changes, the install skips that mod and asks
-  you to delete one of them.
+- The exe is built without UPX compression, which antivirus programs flag
+  far more often.
+
+**For contributors**
+
+- Each checkout of the repo keeps its test sandboxes in its own temp folder,
+  so several worktrees can run the tests at once.
+- The zip-slip test can now fail: a broken guard used to write outside the
+  folder the test searched.
+- The whole suite also passes on Linux, which is useful for CI.
 
 ## 1.0.0 - first public release
 
