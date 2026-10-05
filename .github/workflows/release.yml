@@ -1,0 +1,59 @@
+name: Release
+
+# Publishes a release from main: runs the tests, builds the app on GitHub's
+# own Windows machines, and uploads the exe and the zip with their SHA-256.
+# The version comes from `local VERSION` in ingame/PalModManager/Scripts/main.lua
+# and the notes from that version's section of its CHANGELOG.md.
+#
+# Run it from the Actions tab: Release > Run workflow.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stop if this version is already released
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ver = (Select-String -Path ingame/PalModManager/Scripts/main.lua `
+                   -Pattern 'local VERSION\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          gh release view "v$ver" *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Error "v$ver is already released. Raise VERSION in Scripts/main.lua first."
+            exit 1
+          }
+          exit 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install build tools
+        run: python -m pip install -r requirements.txt
+
+      - name: Tests
+        run: python tests/run_all.py
+
+      - name: Build
+        run: |
+          python -m PyInstaller build/PalModManager.spec --distpath dist/app --workpath build/pyi --noconfirm
+          python package.py --release
+
+      - name: Publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ver = Get-Content dist/version.txt
+          gh release create "v$ver" dist/app/EZPalModManager.exe "dist/EZPalModManager-$ver.zip" `
+            --title "EZ Pal Mod Manager $ver" --notes-file dist/release-notes.md `
+            --target $env:GITHUB_SHA

@@ -12,9 +12,13 @@ Pal Insight and PalMiniMap use.
         enabled.txt
         Scripts/main.lua
 
-    python package.py
+    python package.py             the zip
+    python package.py --release   the zip, which must hold the exe, plus
+                                  dist/release-notes.md and dist/version.txt
+                                  for the GitHub release
 """
 
+import hashlib
 import re
 import sys
 import zipfile
@@ -74,6 +78,51 @@ def main():
     print(f"built {out}  ({out.stat().st_size:,} bytes)")
     for w in written:
         print("  ", w)
+    if "--release" in sys.argv:
+        if exe.name not in written:
+            sys.exit(f"{exe} isn't built, so the zip has no app in it. "
+                     f"Run PyInstaller first.")
+        notes = dist / "release-notes.md"
+        notes.write_text(release_notes(ver, exe, out), "utf8")
+        (dist / "version.txt").write_text(ver, "utf8")
+        print(f"wrote {notes}")
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def changelog(ver):
+    """This version's part of the changelog, without its heading."""
+    text = (MOD / "CHANGELOG.md").read_text("utf8")
+    m = re.search(rf"^## {re.escape(ver)}[ \t]*\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+    if not m:
+        sys.exit(f"CHANGELOG.md has no section for {ver}")
+    return m.group(1).strip()
+
+
+def release_notes(ver, exe, zip_path):
+    """The release page: what each download is, what changed, and the hashes
+    people check their download against."""
+    width = max(len(exe.name), len(zip_path.name)) + 1
+    return "\n".join([
+        f"**{exe.name}**: the app on its own. Put it anywhere and run it.",
+        f"**{zip_path.name}**: the app plus the optional in-game panel (F8). "
+        f"Extract into your Palworld folder.",
+        "",
+        changelog(ver),
+        "",
+        "**SHA-256**",
+        "```",
+        f"{exe.name:<{width}}{sha256(exe)}",
+        f"{zip_path.name:<{width}}{sha256(zip_path)}",
+        "```",
+        "",
+    ])
 
 
 if __name__ == "__main__":
