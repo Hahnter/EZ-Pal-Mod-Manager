@@ -69,22 +69,26 @@ check("a sibling folder with a longer name is not 'inside'",
       not palinstall.inside(SB / "Win64evil" / "x.dll", SB / "Win64"))
 check("a real child is inside",
       palinstall.inside(SB / "Win64" / "ue4ss" / "x.dll", SB / "Win64"))
+# Names aimed at the root of the drive or at C:\Windows are only ever checked
+# as paths, never unpacked: with the guard broken, unpacking would write there.
+for name in ("/abs/escaped.txt", "C:/Windows/escaped.txt"):
+    check(f"{name} is not 'inside' the unpack folder",
+          not palinstall.inside(SB / "unpack" / name, SB / "unpack"))
 
+# Unpacked three folders deep in the sandbox, a member that climbs out still
+# lands inside it, where the check below can find it. So even a broken guard
+# writes nothing outside the temp folder. Never climb more than three levels.
 evil = SB / "evil.zip"
 with zipfile.ZipFile(evil, "w") as z:
     z.writestr("GoodMod/Scripts/main.lua", "print(1)")
     z.writestr("../../escaped.txt", "gotcha")
-    z.writestr("/abs/escaped.txt", "gotcha")
-    z.writestr("C:/Windows/escaped.txt", "gotcha")
-plan = palinstall.inspect(evil)
-names = [c["name"] for c in plan["components"]]
-tmp_files = [p for p in plan["tmp"].rglob("*") if p.is_file()]
-check("the real mod was still found", names == ["GoodMod"], names)
-check("nothing landed outside the unpack folder",
-      all(palinstall.inside(p, plan["tmp"]) for p in tmp_files))
-check("no escaped file anywhere near the sandbox",
-      not list(SB.parent.rglob("escaped.txt")))
-palinstall.discard(plan)
+into = SB / "unpack" / "a" / "b"
+palinstall.unpack(evil, into)
+unpacked = sorted(p.relative_to(into).as_posix() for p in into.rglob("*") if p.is_file())
+check("the real mod was still unpacked",
+      unpacked == ["GoodMod/Scripts/main.lua"], unpacked)
+escaped = list(SB.rglob("escaped.txt"))
+check("nothing climbed out of the unpack folder", not escaped, escaped)
 
 # ==========================================================================
 check.section("zip bombs are refused before they fill the disk")
