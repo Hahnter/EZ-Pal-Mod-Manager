@@ -19,7 +19,7 @@ a = Analysis(
     hiddenimports=['palmods', 'palpaths', 'palregistry', 'palinstall',
                    'palsafety', 'paltools', 'palui', 'palwindows',
                    'palmedia', 'palinfo', 'palicons', 'paltext', 'palget',
-                   'PIL.ImageTk'],
+                   'palworkshop', 'PIL.ImageTk'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

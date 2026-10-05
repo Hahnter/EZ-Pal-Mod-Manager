@@ -397,6 +397,11 @@ python package.py
 The zip lands in `dist/`. Its version comes from `local VERSION` in
 `ingame/PalModManager/Scripts/main.lua`.
 
+Releases are built the same way on GitHub's own Windows machines: **Actions →
+Release → Run workflow** runs the tests, builds the exe and the zip from
+`main`, and publishes both as a release with their SHA-256, under that version
+and its section of the changelog. It stops if the version is already released.
+
 ## Tests
 
 ```bash
