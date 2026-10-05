@@ -4,11 +4,12 @@ UE4SS / PalSchema downloader (with GitHub faked -- no test touches the net).
 import io
 import json
 import zipfile
+from pathlib import Path
 
 from helpers import Checker, fake_pak, make_game, sandbox, scan, use_game
 
 SB = sandbox("updates")
-import palget, palinstall, palmods, palregistry, palsafety     # noqa: E402
+import palget, palinstall, palmods, palregistry, palsafety, paltools  # noqa: E402
 
 check = Checker()
 game = use_game(make_game(SB))
@@ -133,12 +134,20 @@ RELEASES = {
     ],
 }
 
-# A fake UE4SS download: the real zips hold ue4ss\ and the proxy DLL.
+# A fake UE4SS download: the real zips hold ue4ss\ and the proxy DLL, and
+# ship the built-in mods with their lists in ue4ss\Mods.
+DEFAULT_ORDER = ("\r\n".join(paltools.DEFAULT_ORDER_HEADER) + "\r\n").encode()
 ue4ss_zip = io.BytesIO()
 with zipfile.ZipFile(ue4ss_zip, "w") as z:
     z.writestr("ue4ss/UE4SS.dll", "new dll")
     z.writestr("ue4ss/MemberVariableLayout.ini", "[layout]")
     z.writestr("ue4ss/Mods/BPModLoaderMod/Scripts/main.lua", "print('bp')")
+    z.writestr("ue4ss/Mods/BPModLoaderMod/load_order.txt", DEFAULT_ORDER)
+    z.writestr("ue4ss/Mods/mods.txt",
+               "BPModLoaderMod : 1\r\nConsoleEnablerMod : 1\r\nKeybinds : 1\r\n")
+    z.writestr("ue4ss/Mods/mods.json", json.dumps(
+        [{"mod_name": n, "mod_enabled": True}
+         for n in ("BPModLoaderMod", "ConsoleEnablerMod", "Keybinds")], indent=4))
     z.writestr("dwmapi.dll", "proxy")
 UE4SS_BYTES = ue4ss_zip.getvalue()
 # The fake zip is a few hundred bytes; say so, or the size check trips.
@@ -189,6 +198,33 @@ zip_path = palget.download(rel, SB / "downloads",
 check("the file arrived", zip_path.is_file() and zipfile.is_zipfile(zip_path))
 check("progress was reported", bool(seen) and seen[-1][0] == len(UE4SS_BYTES))
 
+# What a real install holds by the time UE4SS is updated: a mod installed
+# here with its settings changed, PalSchema with one mod on and one off, a
+# blueprint load order, and mods.txt and mods.json edited by hand.
+mods_dir = win64 / "ue4ss/Mods"
+plan = palinstall.inspect(mod_zip("v5", 3))
+palinstall.apply(plan)
+palinstall.discard(plan)
+cfg.write_text(json.dumps({"Speed": 9, "Sound": False}))
+receipt_files = palregistry.receipt("SpeedMod")["files"]
+schema = mods_dir / "PalSchema"
+(schema / "dlls").mkdir(parents=True)
+(schema / "dlls/main.dll").write_bytes(b"palschema")
+(schema / "enabled.txt").write_text("")
+for folder, name in (("mods", "BiggerBags"), ("disabled-mods", "CheaperBeds")):
+    (schema / folder / name / "items").mkdir(parents=True)
+    (schema / folder / name / "items/patch.json").write_text("{}")
+(mods_dir / "BPModLoaderMod/Scripts").mkdir(parents=True)
+(mods_dir / "BPModLoaderMod/Scripts/main.lua").write_text("print('old bp')")
+(mods_dir / "BPModLoaderMod/load_order.txt").write_bytes(
+    DEFAULT_ORDER + b"BetterPlayer_P\r\n")
+(mods_dir / "mods.txt").write_bytes(
+    b"BPModLoaderMod : 1\r\nKeybinds : 0\r\nSpeedMod : 1\r\n")
+(mods_dir / "mods.json").write_text(json.dumps(
+    [{"mod_name": "BPModLoaderMod", "mod_enabled": True},
+     {"mod_name": "Keybinds", "mod_enabled": False},
+     {"mod_name": "SpeedMod", "mod_enabled": True}], indent=4))
+
 results, parked = palget.install_ue4ss(zip_path, paths)
 check("the new UE4SS is in place",
       (win64 / "ue4ss/UE4SS.dll").read_text() == "new dll")
@@ -200,6 +236,69 @@ check("the old install was kept, not deleted",
       and (parked[0] / "UE4SS.dll").read_bytes() == b"x", parked)
 check("it says what it did", any("Kept your old UE4SS" in r for r in results),
       results)
+
+check.section("updating UE4SS keeps your mods")
+check("your mod is still there, with the settings you changed",
+      cfg.is_file() and json.loads(cfg.read_text())["Speed"] == 9,
+      cfg.read_text() if cfg.is_file() else "missing")
+check("at the paths its install receipt names",
+      all(Path(f).exists() for f in receipt_files), receipt_files)
+data = palmods.build(palmods.discover())
+names = {m["name"] for m in data["ue4ss_mods"]}
+check("the main list still shows it, and PalSchema",
+      {"SpeedMod", "PalSchema"} <= names, sorted(names))
+on_off = {s["name"]: s["enabled"] for s in data["palschema_mods"]}
+check("PalSchema's mods came along, one on and one off",
+      on_off == {"BiggerBags": True, "CheaperBeds": False}, on_off)
+txt = (mods_dir / "mods.txt").read_bytes()
+check("mods.txt keeps your lines and choices, and gains the new built-in",
+      txt == b"BPModLoaderMod : 1\r\nConsoleEnablerMod : 1\r\n"
+             b"Keybinds : 0\r\nSpeedMod : 1\r\n", txt)
+listed = json.loads((mods_dir / "mods.json").read_text())
+check("mods.json does the same, in the same order",
+      [(e["mod_name"], e["mod_enabled"]) for e in listed]
+      == [("BPModLoaderMod", True), ("ConsoleEnablerMod", True),
+          ("Keybinds", False), ("SpeedMod", True)], listed)
+check("BPModLoaderMod has the new code",
+      (mods_dir / "BPModLoaderMod/Scripts/main.lua").read_text() == "print('bp')")
+order = mods_dir / "BPModLoaderMod/load_order.txt"
+check("but keeps your load order",
+      order.read_bytes() == DEFAULT_ORDER + b"BetterPlayer_P\r\n",
+      order.read_bytes())
+check("with the release's copy beside it",
+      order.with_name("load_order.txt.new").read_bytes() == DEFAULT_ORDER)
+check("the install says what it kept",
+      {"Kept your 2 mods and their settings", "Kept your 2 PalSchema mods"}
+      <= set(results), results)
+check("the parked UE4SS is still whole, mods and all",
+      (parked[0] / "Mods/SpeedMod/config.json").is_file()
+      and (parked[0] / "Mods/PalSchema/mods/BiggerBags").is_dir())
+
+check.section("an install that stops part way")
+(win64 / "ue4ss/UE4SS.dll").write_text("the one you have")
+before = sorted(p.name for p in win64.iterdir())
+real_carry_over = palget.carry_over
+
+
+def disk_full(old, new):
+    real_carry_over(old, new)
+    raise OSError(28, "No space left on device")
+
+
+palget.carry_over = disk_full
+try:
+    palget.install_ue4ss(zip_path, paths)
+    check("the failure is passed on", False)
+except OSError as exc:
+    check("the failure is passed on", "No space" in str(exc), str(exc))
+palget.carry_over = real_carry_over
+check("the UE4SS you had is back in place",
+      (win64 / "ue4ss/UE4SS.dll").read_text() == "the one you have")
+check("with your mods and their settings",
+      cfg.is_file() and json.loads(cfg.read_text())["Speed"] == 9)
+check("and nothing new is left beside it",
+      sorted(p.name for p in win64.iterdir()) == before,
+      sorted(p.name for p in win64.iterdir()))
 
 palmods._doctor_cache.clear()
 st = palmods.ue4ss_status(palmods.discover())
@@ -275,6 +374,9 @@ check("it installed and says so",
       "Close" in str(win.go.cget("text")), win.go.cget("text"))
 check("UE4SS is in place after the window ran",
       (win64 / "ue4ss/UE4SS.dll").read_text() == "new dll")
+check("and your mods came through that update too",
+      cfg.is_file() and json.loads(cfg.read_text())["Speed"] == 9
+      and (win64 / "ue4ss/Mods/PalSchema/mods/BiggerBags").is_dir())
 win.destroy()
 
 check.section("the banner offers it when UE4SS is missing")

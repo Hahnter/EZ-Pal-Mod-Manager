@@ -22,7 +22,9 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import palinstall
+import palmods
 import palpaths
+from paltext import plural
 
 # Palworld needs Okaetsu's fork. The official RE-UE4SS 3.0.1 installs flat
 # into Win64 and current Palworld mods do not load under it.
@@ -299,8 +301,189 @@ def park(path):
     return spare
 
 
+# Files inside a built-in mod that people edit. The release's code replaces
+# the old code; these keep the user's copy, with the release's beside it.
+KEEP_EDITED = {"load_order.txt"}
+
+
+def _is_link(p):
+    return p.is_symlink() or p.is_junction()
+
+
+def _users_file(rel):
+    return rel.name.lower() in KEEP_EDITED or palinstall.looks_like_config(rel)
+
+
+def _merge_builtin(old_dir, new_dir):
+    """A built-in mod the new release ships: its code, the user's files."""
+    kept = []
+    for src in sorted(p for p in old_dir.rglob("*") if p.is_file()):
+        rel = src.relative_to(old_dir)
+        dst = new_dir / rel
+        if not dst.exists():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+        elif dst.is_file() and _users_file(rel) \
+                and src.read_bytes() != dst.read_bytes():
+            shutil.copy2(dst, dst.with_name(dst.name + ".new"))
+            shutil.copy2(src, dst)
+            kept.append(f"{old_dir.name}\\{rel}")
+    # Switched off here before: a shipped enabled.txt must not turn it on.
+    on, off = new_dir / "enabled.txt", new_dir / "enabled.txt.disabled"
+    if (old_dir / "enabled.txt.disabled").is_file() \
+            and not (old_dir / "enabled.txt").is_file() and on.is_file():
+        on.replace(off)
+    return kept
+
+
+def _insert_new(mine, theirs, name_of):
+    """Add the entries only `theirs` has, each after the entry before it there.
+
+    Everything already in `mine` stays where it is, as it is: the user's
+    order, comments and on/off values. Returns how many were added.
+    """
+    added, prev = 0, None
+    for entry in theirs:
+        name = name_of(entry)
+        if name is None:
+            continue
+        have = [name_of(e) for e in mine]
+        if name not in have:
+            if prev is not None:
+                at = have.index(prev) + 1
+            else:                             # just before the first entry
+                at = next((i for i, n in enumerate(have) if n is not None),
+                          len(mine))
+            mine.insert(at, entry)
+            added += 1
+        prev = name
+    return added
+
+
+def _mods_txt_name(line):
+    m = palmods.MODS_TXT_LINE.match(line)
+    return m.group(2) if m and not line.lstrip().startswith(";") else None
+
+
+def _merge_mods_txt(old, new):
+    # surrogateescape writes back whatever bytes were there, valid UTF-8 or not.
+    mine = old.read_bytes().decode("utf8", "surrogateescape")
+    theirs = new.read_bytes().decode("utf8", "surrogateescape")
+    lines = mine.splitlines()
+    if not _insert_new(lines, theirs.splitlines(), _mods_txt_name):
+        shutil.copy2(old, new)
+        return
+    # The shipped file uses CRLF; added lines follow whatever the user's uses.
+    eol = "\r\n" if "\r\n" in (mine if "\n" in mine else theirs) else "\n"
+    end = eol if not mine or mine.endswith(("\n", "\r")) else ""
+    new.write_bytes((eol.join(lines) + end).encode("utf8", "surrogateescape"))
+
+
+def _merge_mods_json(old, new):
+    def load(p):
+        try:
+            data = json.loads(p.read_text("utf8"))
+        except (OSError, ValueError):
+            return None
+        ok = isinstance(data, list) and all(isinstance(e, dict) for e in data)
+        return data if ok else None
+    mine, theirs = load(old), load(new)
+    if mine is None:
+        return False                          # unreadable: the release's wins
+    if theirs is None or not _insert_new(mine, theirs,
+                                         lambda e: e.get("mod_name")):
+        shutil.copy2(old, new)               # nothing new: keep it byte for byte
+    else:
+        new.write_text(json.dumps(mine, indent=4) + "\n", "utf8")
+    return True
+
+
+def carry_over(old_mods, new_mods):
+    """Bring everything in the old ue4ss\\Mods into the new one.
+
+    Whatever the release doesn't ship is copied back to the same path, which
+    is where install receipts expect it. A built-in mod the release does ship
+    gets the new code and keeps the user's files. mods.txt and mods.json keep
+    the user's on/off values and gain the release's new entries.
+
+    Returns lines to show.
+    """
+    new_mods.mkdir(parents=True, exist_ok=True)
+    mods, lists, edited = [], [], []
+    for src in sorted(old_mods.iterdir()):
+        dst = new_mods / src.name
+        if src.name.lower() in ("mods.txt", "mods.json") \
+                and src.is_file() and not dst.is_dir():
+            if not dst.exists():
+                shutil.copy2(src, dst)
+            elif src.read_bytes() == dst.read_bytes():
+                continue
+            elif src.name.lower() == "mods.txt":
+                _merge_mods_txt(src, dst)
+            elif not _merge_mods_json(src, dst):
+                continue
+            lists.append(src.name)
+            continue
+        if dst.exists():
+            if src.is_dir() and dst.is_dir():
+                edited += _merge_builtin(src, dst)
+            continue
+        if _is_link(src):
+            # A link to a mod kept somewhere else, usually one being worked
+            # on. Moved, so it still points there.
+            src.rename(dst)
+        elif src.is_dir():
+            shutil.copytree(src, dst)
+        else:
+            shutil.copy2(src, dst)
+        if src.name not in palmods.BUILTIN and dst.is_dir() \
+                and palmods.is_mod_dir(dst):
+            mods.append(src.name)
+
+    schema = new_mods / "PalSchema"
+    schema_mods = sum(1 for sub in ("mods", palmods.PALSCHEMA_OFF)
+                      if (schema / sub).is_dir()
+                      for d in (schema / sub).iterdir() if d.is_dir())
+    out = []
+    if mods:
+        out.append(f"Kept your {plural(len(mods), 'mod')} and "
+                   f"{'its' if len(mods) == 1 else 'their'} settings")
+    if schema_mods:
+        out.append(f"Kept your {plural(schema_mods, 'PalSchema mod')}")
+    if lists:
+        out.append(f"Kept which mods are on and off in {' and '.join(lists)}")
+    if edited:
+        out.append(f"Kept your {', '.join(edited)}. This release's "
+                   + ("copies are beside them" if len(edited) > 1
+                      else "copy is beside it") + " as .new")
+    return out
+
+
+def _put_back(win64, old, flat_old):
+    """Undo a UE4SS install that stopped part way."""
+    new = win64 / "ue4ss"
+    if old is not None and (old / "Mods").is_dir() and (new / "Mods").is_dir():
+        # Links carry_over moved across go back first. Removing the folder
+        # would drop them.
+        for p in (new / "Mods").iterdir():
+            if _is_link(p) and not (old / "Mods" / p.name).exists():
+                p.rename(old / "Mods" / p.name)
+    if new.exists():
+        # What is left is the release's files and copies. The originals are
+        # still in the parked folder.
+        shutil.rmtree(new)
+    if old is not None:
+        old.rename(new)
+    if flat_old is not None and not (win64 / "UE4SS.dll").exists():
+        flat_old.rename(win64 / "UE4SS.dll")
+
+
 def install_ue4ss(zip_path, paths):
     """Put a downloaded UE4SS into Win64, keeping whatever was there.
+
+    The old ue4ss folder is parked whole, so it can be gone back to, and
+    everything in its Mods folder is copied into the new one. If anything
+    fails part way, the old folder is put back.
 
     Returns (results, parked) -- lines to show, and the paths moved aside.
     """
@@ -314,31 +497,50 @@ def install_ue4ss(zip_path, paths):
                        if n.replace("\\", "/").startswith(root + "/")]
 
         existing = win64 / "ue4ss"
+        old = flat_old = None
         if existing.exists():
-            parked.append(park(existing))
-            results.append(f"Kept your old UE4SS as {parked[-1].name}")
+            old = park(existing)
+            parked.append(old)
+            results.append(f"Kept your old UE4SS as {old.name}")
         # A flat-layout UE4SS.dll beside it would load instead of the new one.
         flat = win64 / "UE4SS.dll"
         if flat.is_file():
-            parked.append(park(flat))
+            flat_old = park(flat)
+            parked.append(flat_old)
             results.append(f"Moved the old flat UE4SS.dll aside as "
-                           f"{parked[-1].name}")
+                           f"{flat_old.name}")
 
-        written = 0
-        for name in members:
-            rel = name.replace("\\", "/")
-            if root:
-                rel = rel[len(root) + 1:]
-            if not rel or ".." in Path(rel).parts or Path(rel).is_absolute():
-                continue
-            target = win64 / rel
-            if not palinstall.inside(target, win64):
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(name) as src, open(target, "wb") as dst:
-                shutil.copyfileobj(src, dst)
-            written += 1
-        results.append(f"Installed UE4SS into {win64}")
+        try:
+            written = 0
+            for name in members:
+                rel = name.replace("\\", "/")
+                if root:
+                    rel = rel[len(root) + 1:]
+                if not rel or ".." in Path(rel).parts or Path(rel).is_absolute():
+                    continue
+                target = win64 / rel
+                if not palinstall.inside(target, win64):
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(name) as src, open(target, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                written += 1
+            results.append(f"Installed UE4SS into {win64}")
+            # Parking took ue4ss\Mods along. Copied back, so the parked
+            # UE4SS stays whole for going back to.
+            if old is not None and (old / "Mods").is_dir():
+                results += carry_over(old / "Mods", existing / "Mods")
+        except BaseException as exc:
+            try:
+                _put_back(win64, old, flat_old)
+            except OSError:
+                if old is not None:
+                    raise GetError(
+                        f"Installing UE4SS stopped part way ({exc}). Your "
+                        f"old UE4SS and your mods are safe in {old.name}. To "
+                        f"go back to it, delete the ue4ss folder beside it "
+                        f"and rename {old.name} to ue4ss.") from exc
+            raise
 
     if not any((win64 / n).is_file() for n in PROXY_NAMES):
         results.append("Warning: the zip carried no proxy DLL (dwmapi.dll), "

@@ -617,11 +617,12 @@ class GetWindow(Window):
             ue = self.app._data["ue4ss"]
             if ue["installed"]:
                 self.note("Your current UE4SS is kept as a folder named "
-                          "ue4ss.pmm-old-<date>, so you can go back to it. "
-                          "Your mods and their settings are not touched.",
+                          "ue4ss.pmm-old-<date>, so you can go back to it.",
                           DIM, pady=(10, 2), icon_name="undo")
-            self.note("Mod settings live in ue4ss\\Mods, which this replaces "
-                      "nothing inside of.", FAINT, pady=(0, 2))
+            self.note("Your mods carry over with their settings and stay on "
+                      "or off as they are now. UE4SS's own mods, such as "
+                      "BPModLoaderMod, are updated, but your load order is "
+                      "kept.", DIM, pady=(0 if ue["installed"] else 10, 2))
         else:
             self.note("PalSchema installs like any other mod, into "
                       "ue4ss\\Mods\\PalSchema, and can be switched off from "

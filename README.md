@@ -32,8 +32,9 @@ without its `dwmapi.dll` proxy), two copies fighting, the old flat 3.0.1
 layout, or a missing `MemberVariableLayout.ini`. Each of those gets a banner
 saying what it means. Where the answer is "you need the Palworld build of UE4SS",
 **Install UE4SS** fetches it from Okaetsu's own GitHub releases and puts it in
-place, keeping whatever was there as `ue4ss.pmm-old-<date>`. **Install
-PalSchema** does the same for PalSchema. Both windows show the release, file
+place, keeping whatever was there as `ue4ss.pmm-old-<date>`. Your mods carry
+over to the new one with their settings and stay on or off as they were.
+**Install PalSchema** does the same for PalSchema. Both windows show the release, file
 name, size and source before anything is downloaded, and nothing is fetched
 until you press the button. This is the only part of the app that uses the
 network; see *Privacy and security* below. Pak mods are still managed without UE4SS; they don't need it.
