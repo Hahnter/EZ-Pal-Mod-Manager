@@ -61,11 +61,6 @@ def main():
             if p.is_file():
                 z.write(p, doc)
                 written.append(doc)
-        # Licence lives at the project root, not with the in-game mod.
-        lic = HERE / "LICENSE"
-        if lic.is_file():
-            z.write(lic, "LICENSE")
-            written.append("LICENSE")
         for p in sorted(MOD.rglob("*")):
             if not p.is_file() or p.name in EXCLUDE:
                 continue
