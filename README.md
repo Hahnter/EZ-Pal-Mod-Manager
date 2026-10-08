@@ -440,6 +440,6 @@ working mods out of the folder where they belonged.
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The release exe bundles Python, Tcl/Tk and Pillow,
+Copyright (c) 2026 Hahnter. All rights reserved. The release exe bundles Python, Tcl/Tk and Pillow,
 each under its own permissive license. UE4SS and PalSchema are not included;
 the app downloads them from their authors' GitHub releases when you ask it to.
