@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.1
+
+**License**
+
+- From this version on, EZ Pal Mod Manager is © 2026 Hahnter, all rights
+  reserved. Versions up to 1.1.0 were released under the MIT License, and
+  copies of those keep it. The zip no longer includes a LICENSE file.
+- Nothing else changed.
+
 ## 1.1.0
 
 **Steam Workshop mods**
